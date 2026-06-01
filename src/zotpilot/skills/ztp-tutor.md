@@ -89,18 +89,32 @@ density to avoid over-annotation.
 When depth cannot be recognized, default to `速览`.
 
 **If `persona` is `null`:**
-Offer the user a one-time choice (ask once, then stop and wait):
+Ask ONCE (then stop and wait):
 
-> 未检测到阅读画像配置。你可以：
->
-> **A.** 告诉我你的阅读偏好（英文水平 / 领域熟悉度 / 导读深度 / 风格偏好），
-> 我将用于本次导读，并可将其保存到 `~/.config/zotpilot/ZOTPILOT.md`。
->
-> **B.** 直接跳过，使用默认设置（速览 / 中等 / 中等）开始导读。
+> 未检测到阅读画像配置。告诉我你的阅读偏好我会记住，以后不再询问
+> （影响批注密度与是否加术语/长难句层）：英文水平 / 领域熟悉度 /
+> 导读深度 / 风格偏好。或回复「跳过」用默认（速览 / 中等 / 中等）。
 
-If the user provides hints (option A), interpret them as above and continue.
-If the user declines or chooses B, use defaults: sparse density,
-English-proficiency moderate (no term/long-sentence layer). Do not ask again.
+**When the user provides preferences, you MUST persist them before continuing:**
+call `save_reading_persona(persona_text=...)` with the four hints formatted as
+markdown lines, e.g.:
+
+```
+- 英文水平：入门
+- 领域熟悉度：中等
+- 导读深度：速览
+- 风格偏好：结构化要点
+```
+
+This writes the `## 阅读画像 (Reading Persona)` section to
+`~/.config/zotpilot/ZOTPILOT.md` so the NEXT `/ztp-tutor` run auto-detects it
+and does **not** ask again. Confirm to the user it was saved (the tool returns
+`{saved, path, action}`). Do NOT skip this step — failing to persist is exactly
+why the user gets re-asked every run.
+
+If the user replies「跳过」/ declines: use defaults (sparse density,
+English-proficiency moderate, no term/long-sentence layer), do NOT call
+`save_reading_persona`, and do not ask again this run.
 
 ### 2b. Existing annotations (`existing_annotations: list`)
 

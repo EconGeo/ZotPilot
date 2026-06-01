@@ -321,6 +321,7 @@ class TestMCPInstructions:
             "manage_collections",
             "manage_tags",
             "profile_library",
+            "save_reading_persona",
             "search_academic_databases",
             "search_boolean",
             "search_papers",

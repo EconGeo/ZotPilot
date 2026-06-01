@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 _ITEM_KEY_RE = re.compile(r"^[A-Z0-9]{8,}$")
 
 _PERSONA_HEADINGS = ("## 阅读画像", "## Reading Persona")
+# Heading written by save_reading_persona; starts with _PERSONA_HEADINGS[0] so
+# _read_persona() detects it on the next run.
+_PERSONA_CANONICAL_HEADING = "## 阅读画像 (Reading Persona)"
 
 _TRIMMED_SECTION_LABELS = frozenset({"references", "appendix"})
 
@@ -105,6 +108,29 @@ def _read_persona() -> str | None:
             break
     section = "\n".join(lines[start_idx:end_idx]).strip()
     return section or None
+
+
+def _upsert_persona_section(existing: str, section: str) -> str:
+    """Return `existing` with the persona section replaced (if a heading from
+    _PERSONA_HEADINGS is present) or appended. Other content is preserved."""
+    lines = existing.splitlines()
+    start_idx: int | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if any(stripped.startswith(h) for h in _PERSONA_HEADINGS):
+            start_idx = i
+            break
+    section_block = section.rstrip("\n")
+    if start_idx is None:
+        prefix = existing.rstrip("\n")
+        return (f"{prefix}\n\n{section_block}\n" if prefix else f"{section_block}\n")
+    end_idx = len(lines)
+    for j in range(start_idx + 1, len(lines)):
+        if lines[j].lstrip().startswith("## "):
+            end_idx = j
+            break
+    new_lines = lines[:start_idx] + section_block.split("\n") + lines[end_idx:]
+    return "\n".join(new_lines).rstrip("\n") + "\n"
 
 
 def _trim_sections(full_md: str, sections, labels: frozenset) -> str:
@@ -288,6 +314,43 @@ def _candidate_summary(c: Any) -> dict:
 # ---------------------------------------------------------------------------
 # MCP tools
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool(tags=tool_tags("extended", "write"))
+def save_reading_persona(
+    persona_text: Annotated[
+        str,
+        Field(description=(
+            "Reading-persona body to persist under the '## 阅读画像 (Reading Persona)' "
+            "section of ~/.config/zotpilot/ZOTPILOT.md (the heading is added "
+            "automatically). Typically the four hints: 英文水平 / 领域熟悉度 / 导读深度 / "
+            "风格偏好. Call this once after the user states preferences so future "
+            "/ztp-tutor runs don't re-ask. Replaces an existing section if present."
+        )),
+    ],
+) -> dict:
+    """Persist the reading persona to ZOTPILOT.md so it is auto-detected next run."""
+    body = (persona_text or "").strip()
+    if not body:
+        raise ToolError("persona_text is required")
+    path = Path("~/.config/zotpilot/ZOTPILOT.md").expanduser()
+    try:
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    except Exception as e:
+        raise ToolError(f"cannot read {path}: {e}") from e
+    replaced = any(h in existing for h in _PERSONA_HEADINGS)
+    section = f"{_PERSONA_CANONICAL_HEADING}\n\n{body}"
+    new_content = _upsert_persona_section(existing, section)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        raise ToolError(f"cannot write {path}: {e}") from e
+    return {
+        "saved": True,
+        "path": str(path),
+        "action": "replaced" if replaced else "created",
+    }
 
 
 @mcp.tool(tags=tool_tags("extended", "read"))

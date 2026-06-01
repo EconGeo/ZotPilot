@@ -286,6 +286,48 @@ def test_persona_english_heading_recognized(monkeypatch, tmp_path):
     assert "Reading Persona" in result
 
 
+def test_save_reading_persona_creates_then_read_detects(monkeypatch, tmp_path):
+    """save_reading_persona writes a section that _read_persona detects next run."""
+    home = tmp_path / "home"
+    cfg = home / ".config" / "zotpilot"
+    cfg.mkdir(parents=True)
+    (cfg / "ZOTPILOT.md").write_text("# Profile\n\n## 打分指南\n\nkeep me\n", encoding="utf-8")
+    _set_home(monkeypatch, home)
+
+    out = tutor.save_reading_persona(persona_text="- 英文水平：入门\n- 导读深度：速览")
+    assert out["saved"] is True
+    assert out["action"] == "created"
+    # the unrelated section is preserved
+    body = (cfg / "ZOTPILOT.md").read_text(encoding="utf-8")
+    assert "## 打分指南" in body and "keep me" in body
+    # and the persona round-trips through the reader
+    persona = tutor._read_persona()
+    assert persona is not None and "英文水平：入门" in persona
+
+
+def test_save_reading_persona_replaces_existing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    cfg = home / ".config" / "zotpilot"
+    cfg.mkdir(parents=True)
+    (cfg / "ZOTPILOT.md").write_text(
+        "# P\n\n## 阅读画像 (Reading Persona)\n\n- 英文水平：高级\n\n## 别的\n\nkeep\n",
+        encoding="utf-8",
+    )
+    _set_home(monkeypatch, home)
+    out = tutor.save_reading_persona(persona_text="- 英文水平：入门")
+    assert out["action"] == "replaced"
+    persona = tutor._read_persona()
+    assert "入门" in persona and "高级" not in persona
+    body = (cfg / "ZOTPILOT.md").read_text(encoding="utf-8")
+    assert "## 别的" in body and "keep" in body
+
+
+def test_save_reading_persona_empty_raises(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    with pytest.raises(ToolError, match="persona_text is required"):
+        tutor.save_reading_persona(persona_text="   ")
+
+
 # ---------------------------------------------------------------------------
 # annotate_pdf — end to end on fixture
 # ---------------------------------------------------------------------------
