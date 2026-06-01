@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import unicodedata
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -930,9 +931,13 @@ def annotate_pdf_file(
     # 4. backup (verified)
     bak_path = backup_pdf(pdf_path)
 
-    tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".ztptmp")
-    out_path = pdf_path.with_suffix(pdf_path.suffix + ".ztpout")
-    restore_path = pdf_path.with_suffix(pdf_path.suffix + ".ztptmp_restore")
+    # Per-run token so concurrent annotate runs on the SAME pdf don't stomp each
+    # other's transient files. .ztpbak stays a stable, user-facing name (it is
+    # the pristine archive, deliberately shared/clobber-guarded across runs).
+    token = uuid.uuid4().hex[:8]
+    tmp_path = pdf_path.with_suffix(pdf_path.suffix + f".{token}.ztptmp")
+    out_path = pdf_path.with_suffix(pdf_path.suffix + f".{token}.ztpout")
+    restore_path = pdf_path.with_suffix(pdf_path.suffix + f".{token}.ztptmp_restore")
 
     placed: list[AnnotationSpec] = []
     unplaced: list[tuple[str, str]] = []

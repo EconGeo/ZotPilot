@@ -700,6 +700,39 @@ def test_orchestrator_swap_lock_raises_actionable_error(text_pdf: Path, monkeypa
     assert bak.exists()
 
 
+def test_orchestrator_transient_temps_are_token_scoped_and_cleaned(text_pdf: Path, monkeypatch):
+    """Transient temp files carry a per-run token (so concurrent runs on the same
+    PDF don't collide) and are fully cleaned up; only the stable .ztpbak remains."""
+    import shutil as _shutil
+
+    spec = AnnotationSpec(
+        quote="efficient method outperforms", dimension="evidence", comment="c",
+    )
+    real_copy2 = _shutil.copy2
+    seen: dict[str, str] = {}
+
+    def recording_copy2(src, dst, *a, **k):
+        d = str(dst)
+        if d.endswith(".ztptmp"):
+            seen["tmp"] = d
+        return real_copy2(src, dst, *a, **k)
+
+    monkeypatch.setattr("zotpilot.pdf.annotator.shutil.copy2", recording_copy2)
+    report = annotate_pdf_file(text_pdf, [spec], None)
+    assert report.verified is True
+
+    # the work-copy name is token-scoped, not the bare ".ztptmp"
+    assert seen["tmp"].endswith(".ztptmp")
+    assert not seen["tmp"].endswith(text_pdf.suffix + ".ztptmp")  # has a token segment
+
+    # no transient files left behind; only the stable .ztpbak remains
+    residue = list(text_pdf.parent.glob("*.ztptmp")) + \
+        list(text_pdf.parent.glob("*.ztpout")) + \
+        list(text_pdf.parent.glob("*.ztptmp_restore"))
+    assert residue == []
+    assert text_pdf.with_suffix(text_pdf.suffix + ".ztpbak").exists()
+
+
 def test_orchestrator_idempotent_file_size_bounded(text_pdf: Path):
     """3x re-run → file size within 1.05x of single-annotated size."""
     spec = AnnotationSpec(
