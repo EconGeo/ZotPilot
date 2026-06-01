@@ -415,6 +415,28 @@ def _spec_from_dict(i: int, raw: dict) -> AnnotationSpec:
     )
 
 
+def _resolve_specs_input(
+    specs_path: str | None,
+    annotations: list[dict] | None,
+    overview: dict | None,
+) -> tuple[Any, Any]:
+    """Return (annotations, overview), loading them from a JSON file when
+    specs_path is given. The file form keeps the bulky payload out of the
+    tool-call arguments so the approval prompt stays compact."""
+    if not specs_path or not str(specs_path).strip():
+        return annotations, overview
+    path = Path(str(specs_path)).expanduser()
+    if not path.exists():
+        raise ToolError(f"specs_path does not exist: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ToolError(f"specs_path is not valid JSON: {e}") from e
+    if not isinstance(payload, dict):
+        raise ToolError("specs_path JSON must be an object {annotations, overview}")
+    return payload.get("annotations"), payload.get("overview")
+
+
 def _report_to_dict(report) -> dict:
     return {
         "placed": [
@@ -450,27 +472,41 @@ def annotate_pdf(
         str,
         Field(description="Zotero item_key of the paper to annotate"),
     ],
-    annotations: Annotated[
-        list[dict],
+    specs_path: Annotated[
+        str | None,
         Field(description=(
+            "PREFERRED: path to a JSON file {annotations:[...], overview:{...}}. "
+            "Lets the caller keep the bulky annotation payload out of the tool-call "
+            "arguments (cleaner approval prompt). When set, annotations/overview "
+            "args are ignored."
+        )),
+    ] = None,
+    annotations: Annotated[
+        list[dict] | None,
+        Field(description=(
+            "Inline alternative to specs_path. "
             "[{quote, dimension, comment, page_hint?, kind?, page?, bbox?, subtype?}]. "
             "Caps: comment<=500B, quote<=1000B, max 200 annotations. "
             "page_hint is 1-based; kind='region' requires page and bbox."
         )),
-    ],
+    ] = None,
     overview: Annotated[
-        dict,
+        dict | None,
         Field(description=(
+            "Inline alternative to specs_path. "
             "{thesis, skeleton:{question,claim,evidence,rebuttal,conclusion}, "
             "strongest, weakest}. Max 2000 bytes total."
         )),
-    ],
+    ] = None,
 ) -> dict:
     """Write the 5-dim reading guide into the Zotero-stored PDF (in place).
 
     Backup -> work-copy -> distinct full save -> verify -> atomic swap.
     Clears prior ZotPilot annotations on re-run. Foreign annotations are never
     touched.
+
+    Provide the annotation payload EITHER via specs_path (a JSON file, preferred
+    — keeps the approval prompt small) OR inline via annotations + overview.
     """
     if not doc_id or not str(doc_id).strip():
         raise ToolError("doc_id is required")
@@ -483,10 +519,12 @@ def annotate_pdf(
         raise ToolError(f"item {doc_id!r} has no attached PDF")
     pdf_path = Path(pdf_path)
 
+    annotations, overview = _resolve_specs_input(specs_path, annotations, overview)
+
     raw_list = _coerce_list(annotations)
     if not raw_list:
         raise ToolError(
-            "annotations must be a non-empty list (or JSON array string)"
+            "annotations must be a non-empty list (provide specs_path or inline annotations)"
         )
     overview_dict = _coerce_dict(overview)
 

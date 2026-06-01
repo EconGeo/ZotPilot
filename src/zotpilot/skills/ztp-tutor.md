@@ -314,13 +314,26 @@ Review `existing_annotations` one more time before the final list:
 
 ## Step 8 — Call `annotate_pdf`
 
-Call `annotate_pdf` with:
+**Pass the annotation payload via a file, not inline.** The annotation list is
+large; passing it inline as a tool argument produces a cluttered, hard-to-read
+approval prompt. Instead:
 
-```
-doc_id:      the doc_id from Step 1
-annotations: the final list from Steps 3–7
-overview:    the dict from Step 5
-```
+1. Write the payload to a temp JSON file (use the Write tool), shaped as:
+   ```json
+   { "annotations": [ ...the final list from Steps 3–7... ],
+     "overview":    { ...the dict from Step 5... } }
+   ```
+   e.g. `/tmp/ztp-tutor-<doc_id>.json`.
+2. Call `annotate_pdf` with just:
+   ```
+   doc_id:     the doc_id from Step 1
+   specs_path: the temp JSON file path
+   ```
+   The approval prompt then shows only the doc_id and the path — the bulky
+   content lives in the file (reviewable as a normal, collapsible file diff).
+
+Only fall back to passing `annotations` + `overview` inline if writing a temp
+file is not possible in the environment.
 
 Read the returned dict carefully. It contains:
 

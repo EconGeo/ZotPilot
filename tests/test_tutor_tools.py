@@ -361,6 +361,50 @@ def test_annotate_pdf_end_to_end(install_client, single_match_client, fake_item)
     assert marker_n == len(result["placed"]) + 1  # +1 overview
 
 
+def test_annotate_pdf_via_specs_path(install_client, single_match_client, fake_item, tmp_path):
+    """specs_path JSON file is read in lieu of inline annotations/overview
+    (keeps the approval prompt compact)."""
+    install_client(single_match_client)
+    import json as _json
+    specs = tmp_path / "specs.json"
+    specs.write_text(
+        _json.dumps({"annotations": _basic_annotations(), "overview": _basic_overview()}),
+        encoding="utf-8",
+    )
+    result = tutor.annotate_pdf(doc_id=fake_item.item_key, specs_path=str(specs))
+    assert result["verified"] is True
+    assert result["overview_placed"] is True
+    assert len(result["placed"]) == 3
+    assert "导读完成" in result["summary"]
+
+
+def test_annotate_pdf_specs_path_takes_precedence_over_inline(
+    install_client, single_match_client, fake_item, tmp_path
+):
+    install_client(single_match_client)
+    import json as _json
+    specs = tmp_path / "specs.json"
+    specs.write_text(
+        _json.dumps({"annotations": _basic_annotations(), "overview": _basic_overview()}),
+        encoding="utf-8",
+    )
+    # inline annotations is bogus; specs_path should win and succeed
+    result = tutor.annotate_pdf(
+        doc_id=fake_item.item_key,
+        specs_path=str(specs),
+        annotations=[{"bogus": True}],
+        overview={},
+    )
+    assert result["verified"] is True
+    assert len(result["placed"]) == 3
+
+
+def test_annotate_pdf_missing_specs_path_raises(install_client, single_match_client, fake_item):
+    install_client(single_match_client)
+    with pytest.raises(ToolError, match="specs_path does not exist"):
+        tutor.annotate_pdf(doc_id=fake_item.item_key, specs_path="/no/such/specs.json")
+
+
 def test_annotate_pdf_idempotent_rerun(install_client, single_match_client, fake_item):
     install_client(single_match_client)
     first = tutor.annotate_pdf(
