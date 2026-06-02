@@ -12,6 +12,9 @@
     <a href="https://github.com/openai/codex">
       <img src="https://img.shields.io/badge/Codex-74AA9C?style=for-the-badge&logo=openai&logoColor=white" alt="Codex">
     </a>
+    <a href="https://opencode.ai/">
+      <img src="https://img.shields.io/badge/OpenCode-F97316?style=for-the-badge&logoColor=white" alt="OpenCode">
+    </a>
     <a href="https://modelcontextprotocol.io/">
       <img src="https://img.shields.io/badge/MCP-0175C2?style=for-the-badge&logoColor=white" alt="MCP">
     </a>
@@ -21,7 +24,6 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
-    <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
     <img src="https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows">
   </p>
 

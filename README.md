@@ -12,6 +12,9 @@
     <a href="https://github.com/openai/codex">
       <img src="https://img.shields.io/badge/Codex-74AA9C?style=for-the-badge&logo=openai&logoColor=white" alt="Codex">
     </a>
+    <a href="https://opencode.ai/">
+      <img src="https://img.shields.io/badge/OpenCode-F97316?style=for-the-badge&logoColor=white" alt="OpenCode">
+    </a>
     <a href="https://modelcontextprotocol.io/">
       <img src="https://img.shields.io/badge/MCP-0175C2?style=for-the-badge&logoColor=white" alt="MCP">
     </a>
@@ -21,7 +24,6 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
-    <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
     <img src="https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows">
   </p>
 
@@ -86,6 +88,7 @@ ZotPilot 由三部分组成：
 | `ztp-review` | 基于库内论文做综述、聚类、比较、初稿整理 |
 | `ztp-profile` | 分析文献库主题分布、期刊层次、时间跨度、标签使用 |
 | `ztp-setup` | 指导 agent 调用 `zotpilot setup` / `upgrade` / `doctor` 做安装、更新、排错。它不是 CLI 命令本身 |
+| `ztp-tutor` | 五维彩色高亮 + 每句中文批注 + 第 1 页便签概览，直接写进 Zotero 存储的 PDF；备份 `.ztpbak` 可回滚 |
 
 ### 5 个核心能力
 
@@ -126,6 +129,7 @@ ZotPilot 由三部分组成：
 
 > 选定后不建议换。向量维度不同，换模型要 `zotpilot index --force` 重建。
 > 选 `local` 只把 ZotPilot 切到本地嵌入模式；本地模型在首次实际调用 embeddings 时才下载，不在 `setup` 阶段预下载。
+> DashScope 默认使用 OpenAI-compatible embedding endpoint；如需 DashScope 原生 `document` / `query` 非对称检索语义，可运行 `zotpilot config set dashscope_embedding_endpoint native`，然后 `zotpilot index --force` 重建索引。
 
 非交互式（agent 驱动）：
 
