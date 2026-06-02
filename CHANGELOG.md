@@ -2,16 +2,9 @@
 
 ## [Unreleased]
 
-### ✨ ztp-tutor — 论文导读 / Deep Reading Guide
+### Added
 
-- **新 Skill `ztp-tutor`**：`/ztp-tutor <title>` 模糊匹配本地 Zotero 文献，调用 LLM 产出五维（核心论点 / 关键概念 / 实证证据 / 让步反驳 / 方法论）彩色高亮 + 每句中文批注 + 第 1 页论证结构便签概览，直接写入 Zotero 存储的 PDF。可在 Zotero 阅读器中直接打开查看，全程本地。
-- **新 MCP 工具**：`get_paper_for_tutor`（fuzzy 检索 + 分页文本 + figures/tables/persona/existing_annotations）和 `annotate_pdf`（原子写入 PDF 高亮和便签）。
-- **个性化阅读画像**：复用 `~/.config/zotpilot/ZOTPILOT.md`，新增可选 `## 阅读画像` 段（英文水平 / 领域熟悉度 / 导读深度 / 风格偏好），Skill 据此调节标注密度，并在英文水平偏弱时追加术语解释 + 长难句拆解层。新 `save_reading_persona` 工具在你首次回答偏好后**自动持久化**该段，后续运行不再重复询问。
-- **多元素覆盖**：图（区域便签 + 标题高亮）/ 表（区域便签或标题高亮）/ 公式（解释句高亮）一并入图；§7.11 智能合并尊重用户既有高亮（IoU>0.5 视为已覆盖、跳过）。
-- **写入安全**：备份 `.ztpbak` → 工作副本 `.ztptmp` → 写入独立 `.ztpout` → 校验（marker 计数 + `mupdf_warnings` + `is_repaired`）→ `os.replace` 原子替换；任意失败回滚不消耗备份。
-- **跨平台兼容性加固**：Windows 文件句柄 / 锁、回滚一致性、平台感知配置路径、路径安全与并发临时文件等多项健壮性修复。
-
-**Manual Zotero spike**：首次启用后请在真实 Zotero 阅读器中打开标注后的 PDF，目视确认中文便签 + 五色高亮渲染正常（RM-2）。
+- **`ztp-tutor` 论文导读 / Deep Reading Guide** —— 新增单篇论文深度导读功能。`/ztp-tutor <标题>` 模糊匹配本地 Zotero 文献后，由 LLM 通读全文，将五维彩色高亮（核心论点 / 关键概念 / 实证证据 / 让步反驳 / 方法论）、逐句中文批注、图表与公式标注，以及第 1 页的论证结构概览便签，直接写入 Zotero 存储的 PDF，可在 Zotero 阅读器中原地打开查看，全程本地。功能会按 `~/.config/zotpilot/ZOTPILOT.md` 中的"阅读画像"自适应调整批注密度与讲解层次（如英文偏弱时补充术语解释与长难句拆解），并尊重 PDF 中已有的人工批注（不重复、不覆盖）。每次写入前自动生成 `.ztpbak` 备份，经独立文件写入、多重校验与原子替换保证原文永不损坏、失败即回滚；跨 macOS / Linux / Windows 均经兼容性加固。配套提供声明式 skill 与 MCP 工具 `get_paper_for_tutor` / `annotate_pdf` / `save_reading_persona`。首次启用后建议在真实 Zotero 阅读器中目视确认中文便签与五色高亮渲染正常。
 
 ## 如何更新 / How to Update
 
