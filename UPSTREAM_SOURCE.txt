@@ -1,0 +1,10 @@
+Upstream source: https://github.com/xunhe730/ZotPilot
+
+This fork (EconGeo/ZotPilot) maintains local patches submitted as PR #14 to upstream.
+See README_EN.md "EconGeo Fork" section for the complete patch list.
+
+Maintenance policy:
+- When PR #14 merges upstream, update research-claude apply.sh to install from xunhe730/ZotPilot
+  and archive this fork (or keep it only for the Ollama provider if that's not merged)
+- Rebase local patches on each upstream release: ~30 lines, low effort
+- Pin research-claude submodule to a tested commit; upgrade via `git submodule update --remote`

@@ -42,6 +42,77 @@
 
 ---
 
+## EconGeo Fork (econgeo/v0.6)
+
+This is a maintained fork of [xunhe730/ZotPilot](https://github.com/xunhe730/ZotPilot) that adds:
+
+| Patch | What it fixes |
+|-------|--------------|
+| **BBT 7+ compatibility** | Zotero's Better BibTeX plugin changed its internal schema in version 7; this fork's `_load_citation_keys` falls back from the missing `citationkey` table to the LokiJS JSON blob in the `better-bibtex` table |
+| **Group library indexing** | Upstream CLI hardcodes personal library; the fork's `Indexer.__init__` accepts an optional `library_id` param so you can index group libraries |
+| **Gemini 429 retry** | Respects the `retryDelay` field in Gemini API error responses instead of hammering with a fixed interval |
+| **Ollama embedding provider** | Local embeddings via `nomic-embed-text` (768 dims) — no API key, no quota, fully offline |
+| **Claude Code skills** | All `ztp-*` skills pre-packaged in `claude-skills/` for easy installation into any project |
+
+### Install from this fork
+
+```bash
+# Using micromamba (recommended — sandboxed, no system Python pollution)
+micromamba create -n zotpilot python=3.12 -c conda-forge
+micromamba activate zotpilot
+pip install git+https://github.com/EconGeo/ZotPilot.git@econgeo/v0.6
+
+# Or if this branch has been merged to main:
+pip install git+https://github.com/EconGeo/ZotPilot.git
+```
+
+### Install Claude Code skills
+
+```bash
+# Copy skills into your project's .claude/skills/
+cp -r claude-skills/ztp-* /your-project/.claude/skills/
+```
+
+Or install globally (active in all Claude Code projects):
+```bash
+cp -r claude-skills/ztp-* ~/.claude/skills/
+```
+
+### Group library indexing
+
+The CLI only indexes your personal library. Use this Python wrapper to index a group library:
+
+```python
+from zotpilot.indexer import Indexer
+from zotpilot.zotero_client import ZoteroClient
+from zotpilot.config import Config
+
+config = Config.load()
+GROUP_ID = 2350352  # find via Zotero → right-click group → Group Settings → URL
+group_lib_id = ZoteroClient.resolve_group_library_id(config.zotero_data_dir, GROUP_ID)
+Indexer(config, library_id=group_lib_id).run()
+```
+
+### Ollama embedding provider (local, no quota)
+
+```bash
+brew install ollama && brew services start ollama
+ollama pull nomic-embed-text
+
+micromamba run -n zotpilot zotpilot config set embedding_provider ollama
+micromamba run -n zotpilot zotpilot config set embedding_model nomic-embed-text
+micromamba run -n zotpilot zotpilot config set embedding_dimensions 768
+```
+
+### Switching back to upstream when patches merge
+
+Track upstream PR #14: `gh pr view xunhe730/ZotPilot/14`. When merged, switch to:
+```bash
+pip install zotpilot   # or git+https://github.com/xunhe730/ZotPilot.git
+```
+
+---
+
 ## v0.5.0 — Research Workflow
 
 The main change in this release: agents can now actually collect papers for you, not just search what's already in your library.
