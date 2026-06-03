@@ -6,6 +6,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -289,5 +290,15 @@ class Config:
             errors.append("Invalid vision_model for vision_provider='dashscope'")
         elif self.vision_provider == "anthropic" and self.vision_model.startswith("qwen"):
             errors.append("Invalid vision_model for vision_provider='anthropic'")
+
+        if self.gemini_base_url:
+            parsed = urlparse(self.gemini_base_url)
+            if parsed.scheme != "https":
+                errors.append(
+                    "gemini_base_url must use https:// — a plaintext endpoint would expose "
+                    f"GEMINI_API_KEY in transit (got '{self.gemini_base_url}')"
+                )
+            elif not parsed.netloc:
+                errors.append(f"gemini_base_url is malformed: {self.gemini_base_url}")
 
         return errors

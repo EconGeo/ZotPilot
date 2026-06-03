@@ -281,3 +281,38 @@ class TestConfigValidation:
         errors = cfg.validate()
 
         assert any("Invalid dashscope_embedding_endpoint" in e for e in errors)
+
+    def test_validate_rejects_http_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.gemini_base_url = "http://insecure-proxy.example.com"
+
+        errors = cfg.validate()
+
+        assert any("gemini_base_url must use https" in e for e in errors)
+
+    def test_validate_accepts_https_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.gemini_base_url = "https://proxy.example.com"
+
+        errors = cfg.validate()
+
+        assert not any("gemini_base_url" in e for e in errors)
+
+    def test_validate_allows_unset_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+
+        errors = cfg.validate()
+
+        assert not any("gemini_base_url" in e for e in errors)

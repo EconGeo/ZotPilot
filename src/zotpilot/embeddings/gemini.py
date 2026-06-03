@@ -40,7 +40,7 @@ class GeminiEmbedder:
         if api_key:
             client_kwargs["api_key"] = api_key
         if base_url:
-            client_kwargs["http_options"] = types.HttpOptions(base_url=base_url)
+            client_kwargs["http_options"] = types.HttpOptions(base_url=base_url.rstrip("/"))
         self.client = genai.Client(**client_kwargs)
         self.model = model
         self.dimensions = dimensions
