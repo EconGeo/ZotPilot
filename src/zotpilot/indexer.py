@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 _VISION_ESTIMATED_COST_PER_TABLE_USD = 0.01
 
 
+class ConfigDriftError(RuntimeError):
+    """Raised when the persisted index config hash differs from the current config.
+
+    Continuing would mix incompatible embedding spaces in a single index and corrupt
+    search results, so indexing blocks until the caller opts into a rebuild with
+    ``force_reindex=True`` (CLI ``--force``).
+    """
+
+
 def _config_hash(config: Config) -> str:
     """Hash of config values that affect indexed content.
 
@@ -153,6 +162,22 @@ class Indexer:
 
         return False, "current"
 
+    def _library_unreachable(self) -> bool:
+        """Best-effort cheap check that the Zotero data directory is reachable.
+
+        Used to refuse orphan reconciliation when the library lives on a drive that
+        is unmounted/unreachable — never wipe the index on a transient signal. When
+        unknown, returns False (the empty-read guard still covers the unmounted->0
+        items case).
+        """
+        data_dir = getattr(self.config, "zotero_data_dir", None)
+        if data_dir is None:
+            return False
+        try:
+            return not Path(data_dir).exists()
+        except OSError:
+            return True
+
     # ------------------------------------------------------------------
     # Main pipeline
     # ------------------------------------------------------------------
@@ -211,8 +236,17 @@ class Indexer:
             logger.info(f"Deduplicated {len(items) - len(unique_items)} duplicate item(s)")
         items = unique_items
         current_doc_ids = {item.item_key for item in items}
-        reconciliation = reconcile_orphaned_index_docs(self.store, current_doc_ids)
-        if reconciliation["deleted_count"] > 0:
+        reconciliation = reconcile_orphaned_index_docs(
+            self.store,
+            current_doc_ids,
+            library_unreachable=self._library_unreachable(),
+        )
+        if reconciliation.get("refused_mass_delete"):
+            logger.warning(
+                "Indexer: refused to delete orphaned indexed document(s) — %s",
+                reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+            )
+        elif reconciliation["deleted_count"] > 0:
             logger.info(
                 "Indexer: removed %d orphaned indexed document(s) not present in the current Zotero PDF library",
                 reconciliation["deleted_count"],
@@ -276,9 +310,17 @@ class Indexer:
             stored_hash = self._config_hash_path.read_text().strip()
 
         if stored_hash and stored_hash != config_hash and not force_reindex:
-            logger.warning(
-                "Config has changed since last index (chunk_size, overlap, embedding, or section settings). "
-                "Run with --force to re-index, otherwise results may be inconsistent."
+            logger.error(
+                "Index configuration drift detected (stored hash %s != current %s); blocking to avoid "
+                "a mixed embedding-space index.",
+                stored_hash,
+                config_hash,
+            )
+            raise ConfigDriftError(
+                "Index configuration has changed since the last run (chunk size/overlap, embedding "
+                "provider/model/dimensions, OCR, or vision settings). Continuing would mix incompatible "
+                "embedding spaces in one index and corrupt search results. Re-run with --force (CLI) or "
+                "force_reindex=True (API) to rebuild the index under the new configuration."
             )
 
         # Store journal reference for use in indexing pipeline
@@ -592,8 +634,17 @@ class Indexer:
             for item in self.zotero.get_all_items_with_pdfs()
             if item.pdf_path and item.pdf_path.exists()
         }
-        final_reconciliation = reconcile_orphaned_index_docs(self.store, final_current_doc_ids)
-        if final_reconciliation["deleted_count"] > 0:
+        final_reconciliation = reconcile_orphaned_index_docs(
+            self.store,
+            final_current_doc_ids,
+            library_unreachable=self._library_unreachable(),
+        )
+        if final_reconciliation.get("refused_mass_delete"):
+            logger.warning(
+                "Indexer: refused end-of-run orphan reconciliation — %s",
+                final_reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+            )
+        elif final_reconciliation["deleted_count"] > 0:
             logger.info(
                 "Indexer: removed %d orphaned indexed document(s) after refresh of Zotero library state",
                 final_reconciliation["deleted_count"],

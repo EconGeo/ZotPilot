@@ -1,10 +1,18 @@
 """Helpers for reconciling Chroma index state with the current Zotero PDF library."""
 
 import json
+import logging
 import os
 import tempfile
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Always-on safety floor: refuse orphan mass-deletion when the proposed deletion
+# exceeds this fraction of the current index. The empty-read and unreachable-dir
+# guards are unconditional and ignore this fraction entirely.
+MASS_DELETE_FRACTION_FLOOR = 0.25
 
 
 def current_library_pdf_doc_ids(zotero) -> set[str]:
@@ -293,12 +301,98 @@ def orphaned_index_doc_ids(store, current_doc_ids: set[str]) -> set[str]:
     return set(store.get_indexed_doc_ids()) - current
 
 
-def reconcile_orphaned_index_docs(store, current_doc_ids: set[str]) -> dict:
-    """Delete orphaned indexed docs from Chroma and return a summary."""
-    orphaned = sorted(orphaned_index_doc_ids(store, current_doc_ids))
+def _mass_delete_refusal_reason(
+    *,
+    current_doc_ids: set[str],
+    library_unreachable: bool,
+    orphan_count: int,
+    index_size: int,
+    allow_mass_delete: bool,
+) -> str | None:
+    """Return a human-readable refusal reason if mass deletion must be blocked, else None.
+
+    Breach conditions (any one):
+      (a) the current-library read is empty (an unmounted drive or partial read is
+          indistinguishable from a truly empty library);
+      (b) the library/data directory is unreachable;
+      (c) the proposed deletion exceeds ``MASS_DELETE_FRACTION_FLOOR`` of the index.
+
+    ``allow_mass_delete`` bypasses ONLY (c); (a) and (b) are never legitimate signals
+    to wipe the index, so they refuse even under the override.
+    """
+    if library_unreachable:
+        return (
+            f"Zotero library/data directory is unreachable — refusing to delete "
+            f"{orphan_count} indexed document(s). Verify the data directory/drive is "
+            f"mounted, then re-run (override is intentionally disabled for unreachable reads)."
+        )
+    if len(current_doc_ids) == 0:
+        return (
+            f"current Zotero library read returned 0 items — refusing to delete "
+            f"{orphan_count} indexed document(s) (an unmounted drive or partial read looks "
+            f"identical to an empty library). Verify the library, then re-run (override is "
+            f"intentionally disabled for empty reads)."
+        )
+    if not allow_mass_delete and index_size > 0:
+        fraction = orphan_count / index_size
+        if fraction > MASS_DELETE_FRACTION_FLOOR:
+            return (
+                f"proposed deletion of {orphan_count}/{index_size} indexed document(s) "
+                f"({fraction:.0%}) exceeds the {MASS_DELETE_FRACTION_FLOOR:.0%} safety floor. "
+                f"If you really removed this many papers in Zotero, re-run with "
+                f"`zotpilot doctor reconcile --force` or `index_library(..., allow_mass_delete=True)`."
+            )
+    return None
+
+
+def reconcile_orphaned_index_docs(
+    store,
+    current_doc_ids: set[str],
+    *,
+    allow_mass_delete: bool = False,
+    library_unreachable: bool = False,
+) -> dict:
+    """Delete orphaned indexed docs from Chroma and return a summary.
+
+    An always-on safety floor refuses mass deletion when the current-library read
+    looks untrustworthy (empty read, unreachable data dir, or a deletion exceeding
+    ``MASS_DELETE_FRACTION_FLOOR`` of the index), so a transient signal can never
+    silently wipe the index.
+
+    Return contract: ``orphaned_doc_ids`` (the would-be orphans) and ``deleted_count``
+    are ALWAYS present with unchanged semantics. On refusal nothing is deleted,
+    ``deleted_count == 0``, and the summary ADDS ``refused_mass_delete: True`` plus
+    ``skipped_reason``; otherwise ``refused_mass_delete: False``.
+    """
+    indexed = set(store.get_indexed_doc_ids())
+    orphaned = sorted(indexed - set(current_doc_ids))
+
+    if orphaned:
+        reason = _mass_delete_refusal_reason(
+            current_doc_ids=current_doc_ids,
+            library_unreachable=library_unreachable,
+            orphan_count=len(orphaned),
+            index_size=len(indexed),
+            allow_mass_delete=allow_mass_delete,
+        )
+        if reason is not None:
+            db_path = getattr(store, "db_path", None)
+            logger.warning(
+                "Refusing orphan reconciliation: %s (index path: %s)",
+                reason,
+                db_path if db_path is not None else "<unknown>",
+            )
+            return {
+                "orphaned_doc_ids": orphaned,
+                "deleted_count": 0,
+                "refused_mass_delete": True,
+                "skipped_reason": reason,
+            }
+
     for doc_id in orphaned:
         store.delete_document(doc_id)
     return {
         "orphaned_doc_ids": orphaned,
         "deleted_count": len(orphaned),
+        "refused_mass_delete": False,
     }

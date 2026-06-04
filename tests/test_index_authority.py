@@ -112,17 +112,115 @@ def test_authoritative_indexed_doc_ids_drops_committed_docs_missing_from_store(t
 
 
 def test_reconcile_orphaned_index_docs_deletes_missing_docs():
+    # Single orphan out of 5 indexed (20%) is below the safety floor -> reconciled.
     store = MagicMock()
-    store.get_indexed_doc_ids.return_value = {"DOC1", "DOC2", "DOC3"}
+    store.get_indexed_doc_ids.return_value = {"DOC1", "DOC2", "DOC3", "DOC4", "DOC5"}
+
+    result = reconcile_orphaned_index_docs(store, {"DOC1", "DOC2", "DOC3", "DOC4"})
+
+    assert result["orphaned_doc_ids"] == ["DOC5"]
+    assert result["deleted_count"] == 1
+    assert result["refused_mass_delete"] is False
+    store.delete_document.assert_called_once_with("DOC5")
+
+
+def _floor_store(indexed):
+    store = MagicMock()
+    store.get_indexed_doc_ids.return_value = set(indexed)
+    store.db_path = "/tmp/chroma"
+    return store
+
+
+def test_reconcile_refuses_when_current_library_read_is_empty():
+    # Empty read (e.g. unmounted drive) must never wipe the index, even when the
+    # orphan list is the entire index.
+    store = _floor_store({"DOC1", "DOC2", "DOC3"})
+
+    result = reconcile_orphaned_index_docs(store, set())
+
+    assert result["deleted_count"] == 0
+    assert result["refused_mass_delete"] is True
+    assert "0 items" in result["skipped_reason"]
+    # Original keys preserved with unchanged semantics (would-be orphans listed).
+    assert isinstance(result["orphaned_doc_ids"], list)
+    assert sorted(result["orphaned_doc_ids"]) == ["DOC1", "DOC2", "DOC3"]
+    assert isinstance(result["deleted_count"], int)
+    store.delete_document.assert_not_called()
+
+
+def test_reconcile_refuses_when_deletion_exceeds_fraction_floor():
+    # 2 of 3 indexed (66%) exceeds the 25% floor -> refused without override.
+    store = _floor_store({"DOC1", "DOC2", "DOC3"})
 
     result = reconcile_orphaned_index_docs(store, {"DOC1"})
 
-    assert result == {
-        "orphaned_doc_ids": ["DOC2", "DOC3"],
-        "deleted_count": 2,
-    }
+    assert result["deleted_count"] == 0
+    assert result["refused_mass_delete"] is True
+    assert "safety floor" in result["skipped_reason"]
+    assert sorted(result["orphaned_doc_ids"]) == ["DOC2", "DOC3"]
+    store.delete_document.assert_not_called()
+
+
+def test_reconcile_override_bypasses_fraction_floor():
+    store = _floor_store({"DOC1", "DOC2", "DOC3"})
+
+    result = reconcile_orphaned_index_docs(store, {"DOC1"}, allow_mass_delete=True)
+
+    assert result["deleted_count"] == 2
+    assert result["refused_mass_delete"] is False
     store.delete_document.assert_any_call("DOC2")
     store.delete_document.assert_any_call("DOC3")
+
+
+def test_reconcile_override_still_refuses_empty_read():
+    store = _floor_store({"DOC1", "DOC2", "DOC3"})
+
+    result = reconcile_orphaned_index_docs(store, set(), allow_mass_delete=True)
+
+    assert result["deleted_count"] == 0
+    assert result["refused_mass_delete"] is True
+    store.delete_document.assert_not_called()
+
+
+def test_reconcile_override_still_refuses_unreachable_dir():
+    store = _floor_store({"DOC1", "DOC2", "DOC3"})
+
+    result = reconcile_orphaned_index_docs(
+        store, {"DOC1"}, allow_mass_delete=True, library_unreachable=True
+    )
+
+    assert result["deleted_count"] == 0
+    assert result["refused_mass_delete"] is True
+    assert "unreachable" in result["skipped_reason"]
+    store.delete_document.assert_not_called()
+
+
+def test_reconcile_normal_case_preserves_contract_keys():
+    # A legit single sub-floor deletion still carries the original typed keys.
+    store = _floor_store({"DOC1", "DOC2", "DOC3", "DOC4", "DOC5"})
+
+    result = reconcile_orphaned_index_docs(store, {"DOC1", "DOC2", "DOC3", "DOC4"})
+
+    assert isinstance(result["orphaned_doc_ids"], list)
+    assert isinstance(result["deleted_count"], int)
+    assert result["refused_mass_delete"] is False
+
+
+def test_authoritative_indexed_doc_ids_with_journal_has_no_floor(tmp_path):
+    # The journal authority helper must NOT apply any mass-delete floor: it deletes
+    # nothing and is unaffected by the guard, even when the current read is empty.
+    from zotpilot.index_authority import (
+        IndexJournal,
+        authoritative_indexed_doc_ids_with_journal,
+    )
+
+    store = MagicMock()
+    store.get_indexed_doc_ids.return_value = {"DOC1", "DOC2", "DOC3"}
+    journal = IndexJournal(tmp_path / "index_journal.json")
+
+    # Empty current library -> empty authoritative set, but no deletion happens.
+    assert authoritative_indexed_doc_ids_with_journal(store, set(), journal) == set()
+    store.delete_document.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
