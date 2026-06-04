@@ -449,7 +449,7 @@ def cmd_status(args):
         try:
             from .embeddings import create_embedder
             from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
-            from .vector_store import VectorStore
+            from .vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError, VectorStore
             from .zotero_client import ZoteroClient
 
             embedder = create_embedder(config)
@@ -461,6 +461,16 @@ def cmd_status(args):
             result["doc_count"] = len(doc_ids)
             result["chunk_count"] = total
             result["index_ready"] = len(doc_ids) > 0
+        except EmbeddingDimensionMismatchError as e:
+            result["errors"].append(
+                f"Embedding dimension mismatch: {e} "
+                "Switch back to the original embedding provider, or reindex with `zotpilot index --force`."
+            )
+        except IndexUnavailableError as e:
+            result["errors"].append(
+                f"Index unavailable (data left intact): {e} "
+                "Often transient — retry; if it persists run `zotpilot doctor --recover-index`."
+            )
         except Exception as e:
             result["errors"].append(f"Index error: {e}")
 
@@ -523,7 +533,7 @@ def cmd_status(args):
     try:
         from .embeddings import create_embedder
         from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
-        from .vector_store import VectorStore
+        from .vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError, VectorStore
         from .zotero_client import ZoteroClient
 
         embedder = create_embedder(config)
@@ -537,6 +547,12 @@ def cmd_status(args):
         print(f"    Chunks:    {total}")
         if doc_ids:
             print(f"    Avg chunks/doc: {total / len(doc_ids):.1f}")
+    except EmbeddingDimensionMismatchError as e:
+        print(f"\n  ✗ Embedding dimension mismatch: {e}")
+        print("    Switch back to the original embedding provider, or reindex with `zotpilot index --force`.")
+    except IndexUnavailableError as e:
+        print(f"\n  ✗ Index unavailable (your data was left intact): {e}")
+        print("    Often transient — retry; if it persists run `zotpilot doctor --recover-index`.")
     except Exception as e:
         print(f"\n  Could not read index: {e}")
 
@@ -545,6 +561,13 @@ def cmd_status(args):
 
 def cmd_doctor(args):
     from .doctor import run_checks
+
+    # `is True` (not truthiness): argparse store_true yields real booleans, while a
+    # MagicMock args object would make a bare getattr truthy and misfire the dispatch.
+    if getattr(args, "recover_index", False) is True:
+        return _cmd_recover_index(args)
+    if getattr(args, "reconcile", False) is True:
+        return _cmd_reconcile(args)
 
     output_json = getattr(args, "json", False)
     full = getattr(args, "full", False)
@@ -590,6 +613,142 @@ def cmd_doctor(args):
 
     has_fail = any(r.status == "fail" for r in results)
     return 1 if (has_fail or embedded) else 0
+
+
+def _cmd_recover_index(args) -> int:
+    """Thin CLI glue for `zotpilot doctor --recover-index` (engine in index_recovery)."""
+    from .embeddings import create_embedder
+    from .index_recovery import (
+        HnswlibUnavailableError,
+        RecoverySourceError,
+        RecoveryVerificationError,
+        recover_index,
+    )
+
+    config = resolve_runtime_config(args.config)
+    source = Path(args.source).expanduser() if getattr(args, "source", None) else None
+    dry_run = getattr(args, "dry_run", False)
+
+    # The re-embed fallback (paid) is only enabled after explicit interactive
+    # confirmation; non-interactive runs stick to the zero-cost HNSW path.
+    embedder = None
+    try:
+        embedder = create_embedder(config)
+    except Exception as exc:  # noqa: BLE001 - embedder only needed for the paid fallback
+        logger.debug("embedder unavailable for recovery fallback: %s", exc)
+
+    def _confirm(report) -> bool:
+        if report.method != "reembed":
+            return True
+        print(
+            f"\n  ⚠ HNSW vectors unreadable — the only way to recover is to RE-EMBED "
+            f"{report.recovered_count} stored chunks via '{config.embedding_provider}'."
+        )
+        print("    This WILL cost embedding-API calls. Install chroma-hnswlib for free recovery:")
+        print(f"      {_recover_install_hint()}")
+        return input("    Proceed with paid re-embed? [y/N] ").strip().lower() in ("y", "yes")
+
+    allow_reembed = not dry_run and sys.stdin.isatty()
+    try:
+        report = recover_index(
+            config.chroma_db_path,
+            config.embedding_dimensions,
+            source=source,
+            dry_run=dry_run,
+            embedder=embedder,
+            allow_reembed=allow_reembed,
+            confirm=_confirm if allow_reembed else None,
+        )
+    except RecoverySourceError as exc:
+        print(f"✗ {exc}")
+        return 1
+    except HnswlibUnavailableError as exc:
+        print(f"✗ {exc}")
+        print(f"  Install the optional recovery extra: {_recover_install_hint()}")
+        return 1
+    except RecoveryVerificationError as exc:
+        print(f"✗ Recovery verification failed — original index left untouched.\n  {exc}")
+        return 1
+
+    print("\nZotPilot Index Recovery")
+    print("=" * 50)
+    for message in report.messages:
+        print(f"  {message}")
+    if report.dry_run:
+        print(
+            f"\n  DRY RUN: would recover {report.recovered_count} chunks across "
+            f"{report.doc_count} documents (method={report.method}). No changes made."
+        )
+        return 0
+    if report.swapped:
+        print(
+            f"\n  ✓ Recovered {report.recovered_count} chunks across {report.doc_count} documents "
+            f"(method={report.method}, merged {report.merged_count} live-only)."
+        )
+        return 0
+    print("\n  Recovery did not complete (no swap performed).")
+    return 1
+
+
+def _recover_install_hint() -> str:
+    from .index_recovery import INSTALL_HINT
+
+    return INSTALL_HINT
+
+
+def _cmd_reconcile(args) -> int:
+    """Standalone orphan reconciliation: opt-in, dry-run preview, --force override."""
+    from .embeddings import create_embedder
+    from .index_authority import (
+        current_library_pdf_doc_ids,
+        orphaned_index_doc_ids,
+        reconcile_orphaned_index_docs,
+    )
+    from .vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError, VectorStore
+    from .zotero_client import ZoteroClient
+
+    config = resolve_runtime_config(args.config)
+    try:
+        store = VectorStore(config.chroma_db_path, create_embedder(config))
+    except EmbeddingDimensionMismatchError as exc:
+        print(f"✗ Embedding dimension mismatch: {exc}")
+        return 1
+    except IndexUnavailableError as exc:
+        print(f"✗ Index unavailable (data left intact): {exc}")
+        return 1
+
+    zotero = ZoteroClient(config.zotero_data_dir)
+    current = current_library_pdf_doc_ids(zotero)
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+
+    if dry_run:
+        orphaned = sorted(orphaned_index_doc_ids(store, current))
+        print("ZotPilot Reconcile (dry run)")
+        print("=" * 50)
+        print(f"  Current library documents: {len(current)}")
+        print(f"  Orphaned indexed documents: {len(orphaned)}")
+        for doc_id in orphaned[:50]:
+            print(f"    - {doc_id}")
+        if len(orphaned) > 50:
+            print(f"    ... and {len(orphaned) - 50} more")
+        print("\n  No changes made. Re-run without --dry-run to reconcile"
+              f"{' (add --force for >25% deletions)' if not force else ''}.")
+        return 0
+
+    # Mirror Indexer._library_unreachable: an unmounted external drive must still
+    # refuse mass deletion even under --force (parity with the auto-callers).
+    library_unreachable = not Path(config.zotero_data_dir).exists()
+    summary = reconcile_orphaned_index_docs(
+        store, current, allow_mass_delete=force, library_unreachable=library_unreachable
+    )
+    if summary.get("refused_mass_delete"):
+        print("✗ Reconciliation refused (no changes made):")
+        print(f"  {summary.get('skipped_reason', 'safety floor breached')}")
+        return 1
+    print(f"✓ Reconciled: deleted {summary['deleted_count']} orphaned document(s) from the index.")
+    return 0
+
 
 def _mask_secret(v: str) -> str:
     return v[:4] + "****" if len(v) > 4 else "****"
@@ -1148,6 +1307,32 @@ def main(argv: list[str] | None = None) -> int:
     sub_doctor.add_argument("--config", type=str, default=None, help="Config file path")
     sub_doctor.add_argument("--json", action="store_true", help="Output as JSON")
     sub_doctor.add_argument("--full", action="store_true", help="Include slow checks (API connectivity)")
+    sub_doctor.add_argument(
+        "--recover-index",
+        action="store_true",
+        help="Rebuild the vector index from an intact SQLite + HNSW backup (zero-cost)",
+    )
+    sub_doctor.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Remove indexed documents that no longer exist in the Zotero library (opt-in)",
+    )
+    sub_doctor.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="Recovery source dir (a 'chroma.corrupt-*' backup); autodiscovered if omitted",
+    )
+    sub_doctor.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview recovery/reconcile actions without writing or deleting",
+    )
+    sub_doctor.add_argument(
+        "--force",
+        action="store_true",
+        help="With --reconcile: allow deletions exceeding the 25%% mass-delete safety floor",
+    )
     sub_doctor.set_defaults(func=cmd_doctor)
 
     # config

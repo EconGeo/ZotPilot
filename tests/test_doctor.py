@@ -107,6 +107,35 @@ class TestCheckChromaDbIndex:
         config.zotero_data_dir = "/fake"
         assert _check_chromadb_index(config).status == "warn"
 
+    @patch("zotpilot.vector_store.VectorStore")
+    @patch("zotpilot.embeddings.create_embedder")
+    def test_fail_on_dimension_mismatch(self, _mock_create_embedder, mock_vector_store_cls):
+        # AC5: a dim mismatch maps to a fail CheckResult with actionable remediation, not a crash.
+        from zotpilot.vector_store import EmbeddingDimensionMismatchError
+
+        mock_vector_store_cls.side_effect = EmbeddingDimensionMismatchError(
+            "index has 768 dimensions but current embedder uses 384 dimensions."
+        )
+        config = MagicMock()
+        config.zotero_data_dir = "/fake"
+        result = _check_chromadb_index(config)
+        assert result.status == "fail"
+        assert "dimension mismatch" in result.message.lower()
+        assert "index --force" in result.message
+
+    @patch("zotpilot.vector_store.VectorStore")
+    @patch("zotpilot.embeddings.create_embedder")
+    def test_fail_on_index_unavailable(self, _mock_create_embedder, mock_vector_store_cls):
+        # AC5: an unavailable index maps to a fail CheckResult pointing at doctor --recover-index.
+        from zotpilot.vector_store import IndexUnavailableError
+
+        mock_vector_store_cls.side_effect = IndexUnavailableError("could not be opened safely")
+        config = MagicMock()
+        config.zotero_data_dir = "/fake"
+        result = _check_chromadb_index(config)
+        assert result.status == "fail"
+        assert "recover-index" in result.message
+
 
 class TestCheckZoteroWebApi:
     def _make_config(self, api_key=None, user_id=None):

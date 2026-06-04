@@ -124,6 +124,8 @@ def _check_secret_backend(config=None, sources: dict[str, str] | None = None) ->
 
 def _check_chromadb_index(config) -> CheckResult:
     """Check ChromaDB index health."""
+    from .vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError
+
     try:
         from .embeddings import create_embedder
         from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
@@ -146,6 +148,22 @@ def _check_chromadb_index(config) -> CheckResult:
                 f"{doc_count} documents, {total} chunks (avg {avg:.1f} chunks/doc)",
             )
         return CheckResult("chromadb_index", "warn", "Index is empty (run 'zotpilot index' to populate)")
+    except EmbeddingDimensionMismatchError as exc:
+        return CheckResult(
+            "chromadb_index",
+            "fail",
+            f"Embedding dimension mismatch: {exc} "
+            "Fix: switch back to the original embedding provider, or reindex with "
+            "'zotpilot index --force'.",
+        )
+    except IndexUnavailableError as exc:
+        return CheckResult(
+            "chromadb_index",
+            "fail",
+            f"Index could not be opened (your data was left intact): {exc} "
+            "Fix: this is often transient — retry; if it persists, run "
+            "'zotpilot doctor --recover-index'.",
+        )
     except Exception as exc:
         return CheckResult("chromadb_index", "fail", f"Cannot open index: {exc}")
 
