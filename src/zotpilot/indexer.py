@@ -168,6 +168,7 @@ class Indexer:
         max_pages: int = 0,
         batch_size: int | None = None,
         journal: IndexJournal | None = None,
+        protected_doc_ids: set[str] | None = None,
     ) -> dict:
         """
         Index all PDFs in Zotero library.
@@ -180,6 +181,8 @@ class Indexer:
             max_pages: Skip PDFs longer than N pages (0 = no limit)
             batch_size: Process at most N items per call (None/0 = all at once)
             journal: Optional IndexJournal for commit tracking
+            protected_doc_ids: Doc IDs from other libraries that should not be
+                treated as orphans during reconciliation (multi-library indexing).
 
         Returns:
             Dict with 'results' (list[IndexResult]) and summary counts.
@@ -212,7 +215,8 @@ class Indexer:
             logger.info(f"Deduplicated {len(items) - len(unique_items)} duplicate item(s)")
         items = unique_items
         current_doc_ids = {item.item_key for item in items}
-        reconciliation = reconcile_orphaned_index_docs(self.store, current_doc_ids)
+        reconcile_ids = current_doc_ids | (protected_doc_ids or set())
+        reconciliation = reconcile_orphaned_index_docs(self.store, reconcile_ids)
         if reconciliation["deleted_count"] > 0:
             logger.info(
                 "Indexer: removed %d orphaned indexed document(s) not present in the current Zotero PDF library",
@@ -593,7 +597,8 @@ class Indexer:
             for item in self.zotero.get_all_items_with_pdfs()
             if item.pdf_path and item.pdf_path.exists()
         }
-        final_reconciliation = reconcile_orphaned_index_docs(self.store, final_current_doc_ids)
+        final_reconcile_ids = final_current_doc_ids | (protected_doc_ids or set())
+        final_reconciliation = reconcile_orphaned_index_docs(self.store, final_reconcile_ids)
         if final_reconciliation["deleted_count"] > 0:
             logger.info(
                 "Indexer: removed %d orphaned indexed document(s) after refresh of Zotero library state",

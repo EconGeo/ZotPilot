@@ -1131,8 +1131,8 @@ def main(argv: list[str] | None = None) -> int:
     sub_index.add_argument("--max-pages", type=int, default=None,
         help="Skip PDFs longer than N pages (default: 40, 0=no limit)")
     sub_index.add_argument("--no-vision", action="store_true", help="Disable vision extraction")
-    sub_index.add_argument("--batch-size", type=int, default=2,
-        help="Process N items per call (default: 2, 0 = all at once)")
+    sub_index.add_argument("--batch-size", type=int, default=0,
+        help="Process N items per call (default: 0 = all at once)")
     sub_index.add_argument("--config", type=str, default=None, help="Config file path")
     sub_index.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     sub_index.set_defaults(func=cmd_index)
