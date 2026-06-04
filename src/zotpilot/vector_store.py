@@ -19,42 +19,69 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Crash-isolated probe timeout (Decision (d)): the read-only probe runs in a
+# subprocess so a Rust-side segfault can't kill the caller; the timeout bounds a
+# hung open (e.g. lock contention) and classifies it as unavailable.
+_PROBE_TIMEOUT_SECONDS = 30
+
 
 def _probe_chroma_db_access(db_path: Path) -> bool:
-    """Probe whether an existing Chroma index can be opened safely.
+    """Probe whether an existing Chroma index can be opened safely (READ-only).
 
-    Run the probe in a subprocess so Rust-side segfaults do not take down the
-    caller. Returns False on any crash or non-zero exit.
+    Runs the probe in a subprocess so Rust-side segfaults do not take down the
+    caller (crash isolation, Decision (d)). The probe is READ-only and does NOT
+    load the HNSW index: it opens the client and does a ``get_collection`` (not
+    ``get_or_create``) without ``peek``/``count``.
+
+    Returns True when the directory is missing or empty (a fresh/first-run dir is
+    openable), and True when the index opens — including when the 'chunks'
+    collection does not exist yet. Returns False on any crash (negative
+    ``returncode``), non-zero exit, or timeout. Never raises; never moves or
+    mutates the directory.
     """
     if not db_path.exists():
         return True
     if not any(db_path.iterdir()):
         return True
 
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import chromadb; "
-                "from chromadb.config import Settings; "
-                f"c=chromadb.PersistentClient(path={str(db_path)!r}, settings=Settings(anonymized_telemetry=False)); "
-                "col=c.get_or_create_collection(name='chunks', metadata={'hnsw:space':'cosine'}); "
-                "col.peek(limit=1)"
-            ),
-        ],
-        capture_output=True,
-        text=True,
+    probe_script = (
+        "import chromadb\n"
+        "from chromadb.config import Settings\n"
+        f"client = chromadb.PersistentClient(path={str(db_path)!r}, "
+        "settings=Settings(anonymized_telemetry=False))\n"
+        "try:\n"
+        "    client.get_collection('chunks')\n"
+        "except (ValueError, chromadb.errors.NotFoundError):\n"
+        "    pass\n"
     )
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    # returncode == 0 -> openable; non-zero (real open error) or negative
+    # (SIGSEGV child) -> unavailable. The READ/open path NEVER quarantines here.
     return probe.returncode == 0
 
 
 def _quarantine_chroma_db(db_path: Path) -> Path | None:
-    """Move a broken Chroma directory aside and return the backup path."""
+    """Move a broken Chroma directory aside and return the backup path.
+
+    Supervised-only helper (doctor recovery / WRITE-path genuine corruption).
+    NOT called from the READ/open path. Uses a nanosecond suffix so rapid
+    successive calls (sub-second) never collide; the backup name keeps the
+    ``{db_path.name}.corrupt-{suffix}`` pattern so ``doctor --recover-index``
+    autodiscovery (glob ``{name}.corrupt-*``) still matches.
+    """
     if not db_path.exists():
         return None
-    suffix = time.strftime("%Y%m%d-%H%M%S")
-    backup = db_path.with_name(f"{db_path.name}.corrupt-{suffix}")
+    backup = db_path.with_name(f"{db_path.name}.corrupt-{time.time_ns()}")
+    while backup.exists():
+        backup = db_path.with_name(f"{db_path.name}.corrupt-{time.time_ns()}")
     shutil.move(str(db_path), str(backup))
     return backup
 
@@ -73,6 +100,15 @@ class EmbeddingDimensionMismatchError(Exception):
     """Raised when embedder dimensions don't match existing index."""
 
 
+class IndexUnavailableError(Exception):
+    """Raised when an existing vector index cannot be opened safely.
+
+    The READ/open path raises this INSTEAD of destroying data: the index bytes
+    are left 100% intact. The message is intentionally actionable and avoids
+    implying user corruption.
+    """
+
+
 class VectorStore:
     """
     ChromaDB-backed vector store for document chunks.
@@ -87,11 +123,17 @@ class VectorStore:
     def __init__(self, db_path: Path, embedder: EmbedderProtocol):
         self.db_path = Path(db_path)
         if not _probe_chroma_db_access(self.db_path):
-            backup = _quarantine_chroma_db(self.db_path)
-            logger.warning(
-                "Chroma index at %s could not be opened safely; moved aside to %s and rebuilding a fresh index.",
-                self.db_path,
-                backup,
+            # READ/open path (B1 refuse-and-alert): NEVER move/delete/recreate.
+            # Leave the bytes 100% intact and raise an actionable error.
+            raise IndexUnavailableError(
+                f"The vector index at {self.db_path} could not be opened safely. "
+                f"Your index files were left untouched.\n"
+                f"This is often TRANSIENT (another process is using the index, or disk "
+                f"contention) — wait a moment and retry.\n"
+                f"If it persists, the index may be unreadable — most commonly because it "
+                f"was built by a different chromadb version, NOT because your data is "
+                f"corrupt. Run 'zotpilot doctor --recover-index' to rebuild it from the "
+                f"intact data."
             )
         self.db_path.mkdir(parents=True, exist_ok=True)
 
