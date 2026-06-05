@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
+from zotpilot import providers
 from zotpilot.cli import (
     ProbeResult,
     _coerce_value,
@@ -112,6 +113,9 @@ class TestInteractiveWizard:
         monkeypatch.setenv("HOME", str(tmp_path))
         zotero_dir = _make_fake_zotero(tmp_path)
         config_dir = tmp_path / ".config" / "zotpilot"
+        ollama_idx = next(
+            i for i, p in enumerate(providers.EMBEDDING_PRESETS, 1) if "Ollama" in p.name
+        )
 
         with (
             patch("zotpilot.config._default_config_dir", return_value=config_dir),
@@ -125,9 +129,10 @@ class TestInteractiveWizard:
             ) as mock_probe,
             patch(
                 "builtins.input",
-                # use-detected, provider=4, preset=3 (Ollama), base_url keep,
-                # model keep, dims keep, skip zotero write creds
-                side_effect=["", "4", "3", "", "", "", "n"],
+                # use-detected, provider=4, preset=<Ollama idx>, base_url keep,
+                # model keep, dims keep, skip zotero write creds. The Ollama
+                # index is computed so adding/reordering presets cannot break it.
+                side_effect=["", "4", str(ollama_idx), "", "", "", "n"],
             ),
         ):
             args = type(

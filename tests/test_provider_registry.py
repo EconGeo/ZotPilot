@@ -177,16 +177,36 @@ class TestResolveSecret:
 
 class TestVendorPresets:
     def test_contains_expected_vendors(self):
-        names = {p.name for p in providers.EMBEDDING_PRESETS}
-        assert "SiliconFlow" in names
-        assert "Zhipu/GLM" in names
-        assert "Custom" in names
+        names = [p.name for p in providers.EMBEDDING_PRESETS]
+        assert any("SiliconFlow" in n for n in names)
+        assert any("Zhipu/GLM" in n for n in names)
         assert any("Ollama" in n for n in names)
+        assert "Custom" in names
 
     def test_excludes_chat_only_vendors(self):
+        # DeepSeek has no embeddings API -- never a preset.
         names = " ".join(p.name for p in providers.EMBEDDING_PRESETS).lower()
         assert "deepseek" not in names
-        assert "qwen" not in names
+        # Qwen3-Embedding is offered ONLY via SiliconFlow's OpenAI-compatible
+        # endpoint, never as a standalone dashscope-native preset.
+        for p in providers.EMBEDDING_PRESETS:
+            if "qwen" in p.embedding_model.lower():
+                assert "siliconflow" in p.base_url.lower()
+
+    def test_curated_siliconflow_models_have_verified_dims(self):
+        # (model -> dimensions) pairs LIVE-VERIFIED against SiliconFlow 2026-06.
+        verified = {
+            "BAAI/bge-m3": 1024,
+            "Qwen/Qwen3-Embedding-0.6B": 1024,
+            "Qwen/Qwen3-Embedding-8B": 2048,
+        }
+        sf = {
+            p.embedding_model: p.embedding_dimensions
+            for p in providers.EMBEDDING_PRESETS
+            if "siliconflow" in p.base_url.lower()
+        }
+        for model, dims in verified.items():
+            assert sf.get(model) == dims, f"{model} preset dims drifted"
 
     def test_ollama_requires_no_key(self):
         ollama = next(p for p in providers.EMBEDDING_PRESETS if "Ollama" in p.name)
@@ -196,6 +216,8 @@ class TestVendorPresets:
         for preset in providers.EMBEDDING_PRESETS:
             if preset.name != "Custom":
                 assert preset.base_url
+                assert preset.embedding_model
+                assert preset.embedding_dimensions > 0
 
 
 class TestConfigHashGoldenBaselines:

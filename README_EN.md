@@ -149,6 +149,20 @@ For `openai-compatible`, set `embedding_base_url` to the vendor's OpenAI-compati
   "embedding_model": "nomic-embed-text", "embedding_dimensions": 768 }
 ```
 
+**Recommended SiliconFlow models (live-verified 2026-06, selectable in the `zotpilot setup` wizard):**
+
+| model | dimensions | notes |
+|-------|-----------|-------|
+| `BAAI/bge-m3` | `1024` (fixed) | multilingual, cheapest, default; rejects the `dimensions` param — auto-handled |
+| `Qwen/Qwen3-Embedding-0.6B` | `1024` (MRL, native 1024) | fast, low cost |
+| `Qwen/Qwen3-Embedding-8B` | `2048` (MRL, native 4096) | best quality |
+
+> These are only wizard **pre-fills**; at runtime there is a single generic `openai-compatible` code path, so you may set `embedding_model` to any model the endpoint supports, or pick "Custom" for any OpenAI-compatible endpoint.
+>
+> **What to enter / format**: `embedding_base_url` (the OpenAI-compatible root, `http(s)://…`, no `user:pass@`), `embedding_model` (the endpoint's exact model id), `embedding_dimensions` (a positive integer: a fixed-dim model's native size, or any supported size for MRL), `embedding_key` (optional — omit for local Ollama).
+>
+> **How it's guaranteed to work + clear errors**: (1) `zotpilot setup` runs a connectivity self-check (a tiny real embed) and flags a dimension mismatch on the spot; (2) at index time a C1 assertion raises `EmbeddingError` naming the exact dimension to set if the server's output differs — never silent corruption; (3) fixed-dim models that reject `dimensions` are auto-retried without it. Common errors: wrong model → `HTTP 400 Model does not exist`; bad/missing key → `HTTP 401 Api key is invalid`; local server down → `Cannot reach … is the server running?`.
+
 > **Provider-switch note**: changing the embedding provider / model / dimensions on an existing library requires `zotpilot index --force` to rebuild. The old vectors remain until then (no silent data loss), but search quality may degrade in the meantime.
 
 Non-interactive (agent-driven):

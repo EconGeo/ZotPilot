@@ -151,6 +151,20 @@ ZotPilot 由三部分组成：
   "embedding_model": "nomic-embed-text", "embedding_dimensions": 768 }
 ```
 
+**SiliconFlow 推荐 model（已 live 实测验证 2026-06，`zotpilot setup` 向导内置可直选）：**
+
+| model | dimensions | 说明 |
+|-------|-----------|------|
+| `BAAI/bge-m3` | `1024`（固定） | 多语言、最便宜、默认首选；该模型会拒绝 `dimensions` 参数，已自动处理 |
+| `Qwen/Qwen3-Embedding-0.6B` | `1024`（MRL 可调，原生 1024） | 快、成本低 |
+| `Qwen/Qwen3-Embedding-8B` | `2048`（MRL 可调，原生 4096） | 质量最佳 |
+
+> 这些只是**向导预填**的便利项，运行时只有一个通用 `openai-compatible` 代码路径——你可以把 `embedding_model` 改成该端点支持的任意模型，或用「Custom」填任意 OpenAI 兼容端点。
+>
+> **你需要填什么 / 格式**：`embedding_base_url`（OpenAI 兼容根地址，`http(s)://…`，不可含 `user:pass@`）、`embedding_model`（端点的精确模型 id）、`embedding_dimensions`（正整数：固定维模型填其原生维度，MRL 模型填任意受支持维度）、`embedding_key`（可选，本地 Ollama 可省）。
+>
+> **如何保证可用 + 报错清晰**：① `zotpilot setup` 写入后会跑一次连通自检（真实嵌入一小段），维度对不上当场提示并可一键改正；② 入库时 C1 断言——服务器返回维度与配置不符会抛 `EmbeddingError` 并写明「应改成 N 维」，绝不静默污染索引；③ 固定维模型若拒绝 `dimensions` 参数会自动去掉重试。常见报错：填错模型 → `HTTP 400 Model does not exist`；key 错/缺 → `HTTP 401 Api key is invalid`；本地端点没起 → `Cannot reach … is the server running?`。
+
 > **切换 provider 提示**：在已建库上更换 embedding provider / model / dimensions 后，需运行 `zotpilot index --force` 重建索引；在重建前旧向量仍保留、不会被静默删除，但检索结果可能不准。
 
 非交互式（agent 驱动）：

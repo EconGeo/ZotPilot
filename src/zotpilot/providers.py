@@ -56,19 +56,44 @@ class VendorPreset(NamedTuple):
     embedding_dimensions: int
     key_url: str
     requires_key: bool
+    note: str = ""  # short value/positioning hint shown in the wizard menu
 
 
-# Seed presets, verified against vendor docs at planning time (2026-06).
-# NO DeepSeek (no embeddings API). NO Qwen preset (stays on dedicated
-# ``dashscope`` provider; reachable via SiliconFlow by overriding the model).
+# Seed presets. Each (model, dimensions) below was LIVE-VERIFIED against the
+# vendor's `/embeddings` endpoint (2026-06): the request succeeds and returns
+# exactly `embedding_dimensions` floats. Re-verify with a real call before
+# changing a value -- a stale dim degrades to a C1 error, not silent corruption.
+# NO DeepSeek (no embeddings API). Qwen3-Embedding is offered ONLY via
+# SiliconFlow's OpenAI-compatible endpoint (never a dashscope-native preset).
+# The curated SiliconFlow rows span the price/quality range; "Custom" remains
+# the generic escape hatch for any other OpenAI-compatible endpoint or model.
 EMBEDDING_PRESETS: list[VendorPreset] = [
     VendorPreset(
-        name="SiliconFlow",
+        name="SiliconFlow · BAAI/bge-m3",
         base_url="https://api.siliconflow.cn/v1",
         embedding_model="BAAI/bge-m3",
         embedding_dimensions=1024,
         key_url="https://cloud.siliconflow.cn",
         requires_key=True,
+        note="multilingual · cheapest · default (fixed 1024)",
+    ),
+    VendorPreset(
+        name="SiliconFlow · Qwen3-Embedding-0.6B",
+        base_url="https://api.siliconflow.cn/v1",
+        embedding_model="Qwen/Qwen3-Embedding-0.6B",
+        embedding_dimensions=1024,
+        key_url="https://cloud.siliconflow.cn",
+        requires_key=True,
+        note="fast · low cost · MRL (resizable)",
+    ),
+    VendorPreset(
+        name="SiliconFlow · Qwen3-Embedding-8B",
+        base_url="https://api.siliconflow.cn/v1",
+        embedding_model="Qwen/Qwen3-Embedding-8B",
+        embedding_dimensions=2048,
+        key_url="https://cloud.siliconflow.cn",
+        requires_key=True,
+        note="best quality · MRL (native 4096)",
     ),
     VendorPreset(
         name="Zhipu/GLM",
@@ -77,6 +102,7 @@ EMBEDDING_PRESETS: list[VendorPreset] = [
         embedding_dimensions=2048,
         key_url="https://open.bigmodel.cn",
         requires_key=True,
+        note="MRL · non-/v1 base (/api/paas/v4)",
     ),
     VendorPreset(
         name="Ollama (local)",
@@ -85,6 +111,7 @@ EMBEDDING_PRESETS: list[VendorPreset] = [
         embedding_dimensions=768,
         key_url="",
         requires_key=False,
+        note="local · no key · free (fixed 768)",
     ),
     VendorPreset(
         name="Custom",
@@ -93,6 +120,7 @@ EMBEDDING_PRESETS: list[VendorPreset] = [
         embedding_dimensions=0,
         key_url="",
         requires_key=True,
+        note="any other OpenAI-compatible endpoint",
     ),
 ]
 

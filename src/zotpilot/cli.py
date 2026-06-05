@@ -136,7 +136,9 @@ def _prompt_openai_compatible() -> tuple[str, str, int, str | None]:
     print("\n  OpenAI-compatible embedding endpoint.")
     print("  Choose a preset (auto-fills base_url / model / dimensions):")
     for i, preset in enumerate(presets, 1):
-        print(f"    {i}. {preset.name}")
+        detail = f" ({preset.embedding_dimensions}d)" if preset.embedding_dimensions else ""
+        hint = f"  [{preset.note}]" if preset.note else ""
+        print(f"    {i}. {preset.name}{detail}{hint}")
     sel = input(f"  Choice [1-{len(presets)}]: ").strip()
     try:
         preset = presets[int(sel) - 1]

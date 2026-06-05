@@ -54,15 +54,22 @@ entries that **only** pre-fill the interactive setup wizard for the
 best-effort and drift-tolerant: a stale preset just means "the user overrides the
 wrong default," not a crash (`Custom` is always a fallback).
 
-- To add/update a vendor: append or edit a `VendorPreset(name, base_url,
-  embedding_model, embedding_dimensions, key_url, requires_key)`. Set
-  `requires_key=False` for keyless local endpoints (e.g. Ollama).
-- Seed values were verified against vendor docs (SiliconFlow / Zhipu·GLM /
-  Ollama / OpenAI) in 2026-06; re-verify against the vendor's current docs when
-  updating, since dimensions and base_url roots change.
+- To add/update a vendor or model: append or edit a `VendorPreset(name,
+  base_url, embedding_model, embedding_dimensions, key_url, requires_key, note)`.
+  Set `requires_key=False` for keyless local endpoints (e.g. Ollama). `note` is a
+  short value/positioning hint shown in the wizard menu (e.g. "best quality").
+  Multiple curated models for one vendor are just multiple rows (e.g. SiliconFlow
+  seeds `BAAI/bge-m3`, `Qwen3-Embedding-0.6B`, `Qwen3-Embedding-8B`).
+- **Each `(embedding_model, embedding_dimensions)` MUST be live-verified** against
+  the vendor's real `/embeddings` endpoint before committing — POST the model and
+  assert the response returns exactly that many floats. Do NOT trust docs alone:
+  e.g. SiliconFlow `bge-m3` returns HTTP 400 if `dimensions` is sent at all (it is
+  fixed-dim), while Qwen3-Embedding (MRL) honors it. A stale dim degrades to a C1
+  error at index time, not silent corruption, but a wrong seed is still a bad UX.
 - **Do NOT add chat-only vendors** that have no embeddings API (e.g. DeepSeek).
-  Qwen stays on the dedicated `dashscope` provider (native asymmetric retrieval);
-  it is still reachable via the SiliconFlow preset by overriding the model.
+  Qwen3-Embedding is offered ONLY via SiliconFlow's OpenAI-compatible endpoint
+  (`base_url` = SiliconFlow), never as a standalone dashscope-native preset — the
+  dedicated `dashscope` provider keeps Qwen's native asymmetric-retrieval path.
 
 ## Adding a New MCP Tool
 
