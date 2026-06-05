@@ -3,11 +3,12 @@ import concurrent.futures
 import logging
 import time
 
+# Re-exported for backward compatibility; the canonical hierarchy lives in base.py.
+from .base import EmbeddingError, RateLimitError, parse_retry_delay
+
 logger = logging.getLogger(__name__)
 
-
-class EmbeddingError(Exception):
-    """Raised when embedding fails after retries."""
+__all__ = ["GeminiEmbedder", "EmbeddingError", "RateLimitError"]
 
 
 class GeminiEmbedder:
@@ -78,6 +79,22 @@ class GeminiEmbedder:
                     f"{self.timeout}s (attempt {attempt}/{self.max_retries})"
                 )
             except Exception as e:
+                from google.genai.errors import ClientError
+                if isinstance(e, ClientError) and (
+                    getattr(e, "code", None) == 429
+                    or getattr(e, "status", None) == "RESOURCE_EXHAUSTED"
+                ):
+                    # retry_after source: ClientError.message keeps only the short reason
+                    # ("quota exceeded"); the retryDelay lives in e.details (structured
+                    # response_json) and in str(e) == f"{code} {status}. {details}". Parse
+                    # details first, fall back to str(e). NEVER use e.message — it drops
+                    # retryDelay ⇒ retry_after=None.
+                    detail = str(getattr(e, "details", "") or "") or str(e)
+                    raise RateLimitError(
+                        f"Gemini rate limit (batch {batch_num}/{total_batches})",
+                        provider="gemini",
+                        retry_after=parse_retry_delay(detail),
+                    ) from e
                 logger.warning(
                     f"Batch {batch_num}/{total_batches} failed "
                     f"(attempt {attempt}/{self.max_retries}): {type(e).__name__}: {e}"
