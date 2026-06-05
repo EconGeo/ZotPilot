@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from tqdm import tqdm
 
 from .config import Config
 from .embeddings import create_embedder
+from .embeddings.base import RateLimitError
 from .index_authority import (
     IndexJournal,
     mark_committed,
@@ -27,6 +29,21 @@ from .zotero_client import ZoteroClient
 logger = logging.getLogger(__name__)
 
 _VISION_ESTIMATED_COST_PER_TABLE_USD = 0.01
+
+# Generic provider-agnostic backstop: abort after this many consecutive
+# same-signature doc failures even when no RateLimitError was classified.
+CONSECUTIVE_FAILURE_ABORT_THRESHOLD = 3
+
+
+def _failure_signature(e: Exception) -> str:
+    """Normalize volatile tokens so two same-cause failures compare equal.
+
+    Strips ``Batch N/M`` and char/text counts so e.g. a quota failure on
+    "Batch 3/9 ... (32 texts, 5000 chars)" matches one on "Batch 7/9 ...".
+    """
+    msg = re.sub(r"[Bb]atch \d+/\d+", "Batch N/M", str(e))
+    msg = re.sub(r"\d+\s*(texts?|chars?)", r"N \1", msg)
+    return f"{type(e).__name__}:{msg}"
 
 
 class ConfigDriftError(RuntimeError):
@@ -273,7 +290,6 @@ class Indexer:
                 }
 
         if title_pattern:
-            import re
             if len(title_pattern) > 200:
                 raise ValueError(f"title_pattern too long ({len(title_pattern)} chars, max 200)")
             try:
@@ -542,7 +558,15 @@ class Indexer:
         if total_to_store > 0:
             logger.info(f"Indexing: chunking and storing {total_to_store} papers")
 
-        for idx, (item_key, (item, extraction)) in enumerate(doc_extractions.items(), 1):
+        # Snapshot so the never-attempted tail can be enumerated after an abort break (关键1).
+        extraction_items = list(doc_extractions.items())
+        rate_limited_abort = False   # set ONLY by a typed RateLimitError
+        systemic_abort = False       # set ONLY by the generic consecutive-failure backstop
+        abort_index: int | None = None
+        consecutive_same = 0
+        last_failure_sig: str | None = None
+
+        for idx, (item_key, (item, extraction)) in enumerate(extraction_items, 1):
             t0 = time.perf_counter()
             try:
                 n_chunks, n_tables, reason, extraction_stats, quality_grade = self._index_extraction(
@@ -568,11 +592,30 @@ class Indexer:
                         item.item_key, item.title, "empty", reason=reason,
                         quality_grade=quality_grade))
                 logger.debug(f"Completed {item.item_key}: {n_chunks} chunks, {n_tables} tables, quality {quality_grade}")  # noqa: E501
+            except RateLimitError as e:
+                logger.error(f"Rate limit hit on {item.item_key}: {e}")
+                results.append(IndexResult(
+                    item.item_key, item.title, "failed",
+                    reason=f"{type(e).__name__}: {e}"))
+                rate_limited_abort = True
+                abort_index = idx
+                break  # stop the run; remaining papers are untried. MUST break, not raise — see D1/D2.
             except Exception as e:
                 logger.error(f"Failed to index {item.item_key}: {type(e).__name__}: {e}")
                 results.append(IndexResult(
                     item.item_key, item.title, "failed",
                     reason=f"{type(e).__name__}: {e}"))
+                sig = _failure_signature(e)
+                if sig == last_failure_sig:
+                    consecutive_same += 1
+                else:
+                    consecutive_same, last_failure_sig = 1, sig
+                if consecutive_same >= CONSECUTIVE_FAILURE_ABORT_THRESHOLD:
+                    systemic_abort = True          # NOT rate_limited — cause is unknown (关键3)
+                    abort_index = idx
+                    break  # MUST break, not raise — see D1/D2.
+            else:
+                consecutive_same, last_failure_sig = 0, None  # reset on any success
 
             index_times.append(time.perf_counter() - t0)
             if idx % log_interval == 0 or idx == total_to_store:
@@ -585,8 +628,29 @@ class Indexer:
                     f"({avg_t:.1f}s avg, ETA {eta_str})"
                 )
 
+        # Append the never-attempted tail after the break so results/failed/counts agree (关键1).
+        if abort_index is not None:
+            for _k, (_it, _ex) in extraction_items[abort_index:]:
+                results.append(IndexResult(
+                    _it.item_key, _it.title, "failed",
+                    reason="AbortNotAttempted: skipped after early abort (quota/systemic)"))
+
+        # Single source of truth for the abort count — reused by the log and the counts block.
+        aborted = rate_limited_abort or systemic_abort
+        not_indexed_due_to_abort = (
+            len(extraction_items) - (abort_index - 1)
+            if aborted and abort_index is not None
+            else 0
+        )
+
         phase3_elapsed = time.perf_counter() - phase3_start
-        if total_to_store > 0:
+        if aborted:
+            cause = "rate limit" if rate_limited_abort else "consecutive failures"
+            logger.warning(
+                f"Indexing aborted while processing {abort_index}/{total_to_store} papers "
+                f"({cause}); {not_indexed_due_to_abort} not attempted"
+            )
+        elif total_to_store > 0:
             logger.info(
                 f"Indexing complete: {total_to_store} papers in "
                 f"{phase3_elapsed:.1f}s ({phase3_elapsed / total_to_store:.1f}s avg)"
@@ -603,6 +667,12 @@ class Indexer:
             "quality_distribution": quality_distribution,
             "extraction_stats": aggregated_extraction_stats,
         }
+
+        # Abort surfacing (additive; 关键3 naming). `aborted`/`not_indexed_due_to_abort`
+        # were computed once right after the loop — reuse, do NOT recompute the formula.
+        counts["rate_limited_abort"] = rate_limited_abort   # typed RateLimitError only
+        counts["systemic_abort"] = systemic_abort           # generic backstop only (cause unknown)
+        counts["not_indexed_due_to_abort"] = not_indexed_due_to_abort
 
         counts["skipped_no_pdf"] = skipped_no_pdf
         counts["skipped_long"] = len(long_items)
@@ -776,8 +846,6 @@ class Indexer:
 
         # Enrich tables/figures with reference context.
         # Only for real captions (Table N / Figure N), not synthetic ones.
-        import re
-
         from .pdf.extractor import SYNTHETIC_CAPTION_PREFIX
         from .pdf.reference_matcher import get_reference_context
         _TAB_NUM_RE = re.compile(r"(?:Table|Tab\.?)\s+(\d+)", re.IGNORECASE)
@@ -805,6 +873,8 @@ class Indexer:
             try:
                 self.store.add_tables(item_key, doc_meta, real_tables, ref_map=ref_map)
                 n_tables = len(real_tables)
+            except RateLimitError:
+                raise  # quota exhaustion must propagate to the Phase-3 abort, not degrade to a warning
             except Exception as e:
                 logger.warning(f"Table storage failed for {item_key}: {e}")
                 if journal is not None:
@@ -820,6 +890,8 @@ class Indexer:
                 self.store.add_figures(item_key, doc_meta, extraction.figures, ref_map=ref_map)
                 n_figures = len(extraction.figures)
                 logger.debug(f"  Extracted {n_figures} figures")
+            except RateLimitError:
+                raise  # quota exhaustion must propagate to the Phase-3 abort, not degrade to a warning
             except Exception as e:
                 logger.warning(f"Figure storage failed for {item_key}: {e}")
                 if journal is not None:

@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from .base import EmbeddingError, RateLimitError, parse_retry_delay
+
 logger = logging.getLogger(__name__)
 
 # China mainland endpoint (default, OpenAI-compatible)
@@ -118,6 +120,21 @@ class DashScopeEmbedder:
                     f"{self.timeout}s (attempt {attempt}/{self.max_retries})"
                 )
             except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    # Fail fast on quota exhaustion — do NOT burn retries against a dead
+                    # quota. Standard Retry-After lives in the response header; fall back
+                    # to the body. parse_retry_delay returns None on anything unrecognized.
+                    header_hint = e.response.headers.get("Retry-After")
+                    retry_after = (
+                        parse_retry_delay(header_hint)
+                        if header_hint is not None
+                        else parse_retry_delay(e.response.text)
+                    )
+                    raise RateLimitError(
+                        f"DashScope rate limit (batch {batch_num}/{total_batches})",
+                        provider="dashscope",
+                        retry_after=retry_after,
+                    ) from e
                 last_error = f"HTTP {e.response.status_code}: {e.response.text[:300]}"
                 logger.warning(
                     f"Batch {batch_num}/{total_batches} HTTP {e.response.status_code} "
@@ -135,7 +152,6 @@ class DashScopeEmbedder:
                 logger.info(f"Retrying in {backoff}s...")
                 time.sleep(backoff)
 
-        from .gemini import EmbeddingError
         raise EmbeddingError(
             f"Batch {batch_num}/{total_batches} failed after "
             f"{self.max_retries} attempts ({len(batch)} texts, {total_chars} chars)"
@@ -212,6 +228,9 @@ class DashScopeEmbedder:
             batch_num = i // batch_size + 1
             try:
                 batch_results = self._embed_batch(batch, batch_num, total_batches, task_type=task_type)
+            except RateLimitError:
+                # A 429 must NOT degrade into single-text retries against the dead quota.
+                raise
             except Exception:
                 if len(batch) == 1 or task_type == "RETRIEVAL_QUERY":
                     raise
