@@ -253,17 +253,23 @@ def index_library(
 
         effective_max_pages = max_pages if max_pages is not None else config.max_pages
 
-        indexer = Indexer(config)
-        result = indexer.index_all(
-            force_reindex=force_reindex,
-            limit=limit,
-            item_key=item_key,
-            item_keys=item_keys,
-            title_pattern=title_pattern,
-            max_pages=effective_max_pages,
-            batch_size=batch_size if batch_size > 0 else None,
-            journal=journal,
-        )
+        from ..indexer import ConfigDriftError
+        from ..vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError
+
+        try:
+            indexer = Indexer(config)
+            result = indexer.index_all(
+                force_reindex=force_reindex,
+                limit=limit,
+                item_key=item_key,
+                item_keys=item_keys,
+                title_pattern=title_pattern,
+                max_pages=effective_max_pages,
+                batch_size=batch_size if batch_size > 0 else None,
+                journal=journal,
+            )
+        except (ConfigDriftError, IndexUnavailableError, EmbeddingDimensionMismatchError) as e:
+            raise ToolError(str(e)) from e
 
         # Clear query embedding cache so new documents are findable
         _get_store().clear_query_cache()

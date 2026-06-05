@@ -237,10 +237,17 @@ def _get_retriever():
                 from .embeddings import create_embedder
                 from .reranker import Reranker
                 from .retriever import Retriever
-                from .vector_store import VectorStore
+                from .vector_store import (
+                    EmbeddingDimensionMismatchError,
+                    IndexUnavailableError,
+                    VectorStore,
+                )
 
                 embedder = create_embedder(_config)
-                _store = VectorStore(_config.chroma_db_path, embedder)
+                try:
+                    _store = VectorStore(_config.chroma_db_path, embedder)
+                except (IndexUnavailableError, EmbeddingDimensionMismatchError) as e:
+                    raise ToolError(str(e)) from e
                 _retriever = Retriever(_store)
                 _reranker = Reranker(alpha=_config.rerank_alpha)
     return _retriever

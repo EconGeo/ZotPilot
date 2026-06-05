@@ -62,7 +62,7 @@ def _probe_chroma_db_access(db_path: Path) -> bool:
     except subprocess.TimeoutExpired:
         return False
     # returncode == 0 -> openable; non-zero (real open error) or negative
-    # (SIGSEGV child) -> unavailable. The READ/open path NEVER quarantines here.
+    # (SIGSEGV child) -> unavailable. The READ/open path NEVER moves or recreates the dir.
     return probe.returncode == 0
 
 
