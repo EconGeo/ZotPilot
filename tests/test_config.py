@@ -146,6 +146,17 @@ class TestRuntimeResolution:
         assert resolved.sources["gemini_api_key"] == "env-override"
         assert resolved.sources["zotero_user_id"] == "env-override"
 
+    def test_gemini_base_url_env_override(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"gemini_base_url": "https://config.example.com"}))
+        monkeypatch.setenv("GEMINI_BASE_URL", "https://env.example.com")
+
+        resolved = resolve_runtime_settings(config_file)
+
+        assert resolved.config.gemini_base_url == "https://env.example.com"
+        assert resolved.sources["gemini_base_url"] == "env-override"
+
     def test_runtime_loads_config_secrets(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
         config_file = tmp_path / "config.json"
@@ -174,6 +185,16 @@ class TestConfigSave:
         assert saved_data["gemini_api_key"] == "secret-gemini"
         assert saved_data["zotero_api_key"] == "secret-zotero"
         assert saved_data["zotero_user_id"] == "12345"
+
+    def test_save_load_round_trips_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.gemini_base_url = "https://proxy.example.com"
+        save_path = tmp_path / "saved_config.json"
+        cfg.save(path=save_path)
+
+        assert json.loads(save_path.read_text())["gemini_base_url"] == "https://proxy.example.com"
+        assert Config.load(path=save_path).gemini_base_url == "https://proxy.example.com"
 
     def test_save_file_permissions(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
@@ -455,3 +476,42 @@ class TestResolveSecretSaveRoundTrip:
         # The placeholder is persisted literally, NOT the resolved secret.
         assert saved["embedding_api_key"] == "{env:OPENAI_API_KEY}"
         assert "resolved-secret-value" not in out.read_text()
+
+
+class TestGeminiBaseUrlValidation:
+    """gemini_base_url https-only validation (#17)."""
+
+    def test_validate_rejects_http_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.gemini_base_url = "http://insecure-proxy.example.com"
+
+        errors = cfg.validate()
+
+        assert any("gemini_base_url must use https" in e for e in errors)
+
+    def test_validate_accepts_https_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+        cfg.gemini_base_url = "https://proxy.example.com"
+
+        errors = cfg.validate()
+
+        assert not any("gemini_base_url" in e for e in errors)
+
+    def test_validate_allows_unset_gemini_base_url(self, tmp_path, monkeypatch):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg = Config.load(path=tmp_path / "nonexistent.json")
+        cfg.zotero_data_dir = tmp_path
+        (tmp_path / "zotero.sqlite").touch()
+        cfg.gemini_api_key = "set"
+
+        errors = cfg.validate()
+
+        assert not any("gemini_base_url" in e for e in errors)

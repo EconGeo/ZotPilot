@@ -1246,6 +1246,12 @@ def _config_set(key: str, value: str, config_path: Path) -> None:
             data = json.load(f)
     data[key] = _coerce_value(key, value)
     _write_config_data(config_path, data)
+    if key == "gemini_base_url" and value:
+        print(
+            "  NOTE: Your GEMINI_API_KEY will be sent to this endpoint — "
+            "only use an HTTPS proxy you trust.",
+            file=sys.stderr,
+        )
 
 
 def _write_config_data(config_path: Path, data: dict) -> None:
@@ -1273,6 +1279,7 @@ def _write_config_data(config_path: Path, data: dict) -> None:
         raise RuntimeError(f"Failed to write config to {config_path}: {e}") from e
 _ENV_TO_CONFIG = {
     "GEMINI_API_KEY": "gemini_api_key",
+    "GEMINI_BASE_URL": "gemini_base_url",
     "DASHSCOPE_API_KEY": "dashscope_api_key",
     "ZOTERO_API_KEY": "zotero_api_key",
     "ZOTERO_USER_ID": "zotero_user_id",

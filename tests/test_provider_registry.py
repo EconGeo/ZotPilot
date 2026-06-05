@@ -87,6 +87,7 @@ class TestCreateEmbedderBehavior:
         config.gemini_api_key = "test-key"
         config.embedding_timeout = 120.0
         config.embedding_max_retries = 3
+        config.gemini_base_url = None
         with patch("google.genai.Client"):
             assert isinstance(create_embedder(config), GeminiEmbedder)
 

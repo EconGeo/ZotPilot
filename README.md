@@ -212,7 +212,10 @@ zotpilot setup --non-interactive --provider custom \
 ```bash
 export GEMINI_API_KEY=<your-key>           # 或 DASHSCOPE_API_KEY
 export ANTHROPIC_API_KEY=<your-key>        # 可选：复杂表格视觉提取
+export GEMINI_BASE_URL=<https-proxy>       # 可选：Gemini 自定义端点（代理/受限地区）
 ```
+
+> `GEMINI_BASE_URL` 必须是 `https://`，且你的 `GEMINI_API_KEY` 会被发送到该端点——只指向你信任的 HTTPS 代理。留空则用官方端点。
 
 `config.json` 可能包含 API key。不要提交、公开粘贴或同步到不可信位置；共享机器上优先用交互式 `zotpilot setup` 输入密钥，避免把 key 留在 shell history。
 
