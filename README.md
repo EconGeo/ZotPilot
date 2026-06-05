@@ -167,15 +167,33 @@ ZotPilot 由三部分组成：
 
 > **切换 provider 提示**：在已建库上更换 embedding provider / model / dimensions 后，需运行 `zotpilot index --force` 重建索引；在重建前旧向量仍保留、不会被静默删除，但检索结果可能不准。
 
-非交互式（agent 驱动）：
+交互式 `zotpilot setup` 现在是**两层选择**：先选**厂商（vendor）**，再选**模型（model，已预选推荐项，回车即可）**。厂商→模型对照表（单一数据源 `VENDOR_CATALOG`）：
+
+| vendor（别名） | 运行时 provider | base_url | 需 key | 推荐 model · 维度 |
+|---|---|---|:---:|---|
+| `google`（`gemini`） | `gemini` | — | ✓ | `gemini-embedding-001` · 768 |
+| `dashscope` | `dashscope` | — | ✓ | `text-embedding-v4` · 1024 |
+| `local` | `local` | — | ✗ | `all-MiniLM-L6-v2` · 384 |
+| `siliconflow` | `openai-compatible` | `https://api.siliconflow.cn/v1` | ✓ | `BAAI/bge-m3` · 1024 |
+| `zhipu` | `openai-compatible` | `https://open.bigmodel.cn/api/paas/v4` | ✓ | `embedding-3` · 2048 |
+| `ollama` | `openai-compatible` | `http://localhost:11434/v1` | ✗ | `nomic-embed-text` · 768 |
+| `custom`（`openai-compatible`） | `openai-compatible` | 自填 | ✓ | 自填 model + dimensions |
+
+非交互式（agent 驱动）—— 用厂商名一行搞定，省略 `--embedding-model` 即取推荐项；固定 base 的厂商自动带上 base_url 与维度：
 
 ```bash
+zotpilot setup --list-vendors            # 查看全部厂商/模型（加 --json 给 agent 解析）
+zotpilot setup --non-interactive --provider siliconflow --embedding-model BAAI/bge-m3 --embedding-key <key> --verify
+zotpilot setup --non-interactive --provider zhipu --embedding-key <key> --verify      # 省略 model 取推荐 embedding-3
 zotpilot setup --non-interactive --provider gemini   # 或 dashscope / local
-# openai-compatible 需显式传 base_url / model / dimensions（key 对本地 Ollama 可省）：
-zotpilot setup --non-interactive --provider openai-compatible \
-  --embedding-base-url https://api.siliconflow.cn/v1 \
-  --embedding-model BAAI/bge-m3 --embedding-dimensions 1024 --embedding-key <key>
+# custom 厂商仍需显式 base_url / model / dimensions（本地 Ollama 可省 key）：
+zotpilot setup --non-interactive --provider custom \
+  --embedding-base-url http://localhost:11434/v1 \
+  --embedding-model nomic-embed-text --embedding-dimensions 768
+# 兼容旧脚本：--provider gemini|dashscope|local|openai-compatible 仍作为别名有效
 ```
+
+> `--verify`（可选）：写入后做一次连通自检并打印一行 JSON（`ok` / `dim_mismatch` / `auth` / `unreachable` / `error` / `skipped`），便于 agent 自愈。
 
 </details>
 

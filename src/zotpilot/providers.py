@@ -6,11 +6,21 @@ This module is intentionally a LEAF: it imports ONLY the standard library
 risking an import cycle.
 
 It centralizes the embedding provider allow-list, the per-provider model and
-dimension defaults, the (wizard-only) vendor preset catalog, and the shared
-``{env:VAR}`` secret/URL resolution helper.
+dimension defaults, the (setup-only) ``VENDOR_CATALOG`` two-layer vendor->model
+catalog plus its resolvers, and the shared ``{env:VAR}`` secret/URL helper.
 
 Vision provider allow-lists are deliberately NOT centralized here -- they stay
 inline at their existing call sites (see the plan, Decision 6).
+
+**Principle-1 boundary (hard constraint).** ``VENDOR_CATALOG`` and
+``resolve_setup_choice`` (and the ``Vendor``/``VendorModel`` types and the other
+``resolve_*``/``vendor_*`` helpers) are a SETUP-LAYER mapping only. They MUST
+NEVER be imported by :mod:`zotpilot.config` or by any embedder in
+:mod:`zotpilot.embeddings`. The runtime authority stays ``EMBEDDING_PROVIDERS`` +
+``EMBEDDING_MODEL_DEFAULTS`` (read by ``config.load()``); the catalog merely maps
+a human/Agent/CLI vendor choice onto those runtime fields at setup time. A test
+(``test_provider_registry.py``) asserts ``config`` does not import the catalog
+symbols, so a future "DRY the defaults" refactor cannot silently cross this line.
 """
 from __future__ import annotations
 
@@ -40,89 +50,263 @@ EMBEDDING_MODEL_DEFAULTS: dict[str, tuple[str, int]] = {
 }
 
 
-class VendorPreset(NamedTuple):
-    """A wizard-only pre-fill for a known OpenAI-compatible embedding vendor.
+class VendorModel(NamedTuple):
+    """One curated Layer-2 model offered under a :class:`Vendor`.
 
-    Presets are a thin, OPTIONAL data layer that ONLY pre-fills the setup
-    wizard. The generic ``openai-compatible`` provider remains the only runtime
-    code path; presets never appear at runtime. Values are best-effort and
-    drift-tolerant (a stale preset degrades to "user overrides the wrong
-    default", not a crash); ``Custom`` is always a fallback.
+    ``(model, dimensions)`` are advisory setup defaults, LIVE-VERIFIED against
+    the vendor's ``/embeddings`` endpoint before commit (see
+    ``scripts/verify_vendor_catalog.py``). A stale ``dimensions`` degrades to a
+    contributor-time drift-script failure first and at worst a user-side setup
+    probe / runtime C1 warning -- never silent corruption.
     """
 
-    name: str
-    base_url: str
-    embedding_model: str
-    embedding_dimensions: int
-    key_url: str
+    model: str
+    dimensions: int
+    note: str = ""  # value/positioning hint shown in the Layer-2 menu
+    recommended: bool = False  # pre-selected default (blank input picks it)
+
+
+class Vendor(NamedTuple):
+    """One Layer-1 vendor in the two-layer setup catalog.
+
+    Maps a human/Agent/CLI vendor choice onto the runtime ``embedding_provider``
+    (always a member of :data:`EMBEDDING_PROVIDERS`) plus its wire ``base_url``.
+    Multiple vendors may share one runtime ``provider`` (siliconflow/zhipu/ollama/
+    custom all map to ``openai-compatible``, differing only by ``base_url``).
+    """
+
+    key: str  # canonical CLI value, e.g. "siliconflow"
+    label: str  # menu label, e.g. "SiliconFlow"
+    provider: str  # runtime embedding_provider it maps to (in EMBEDDING_PROVIDERS)
+    base_url: str | None  # fixed for siliconflow/zhipu/ollama; None for
+    #                       gemini/dashscope/local; "" => user-supplied (Custom)
     requires_key: bool
-    note: str = ""  # short value/positioning hint shown in the wizard menu
+    key_url: str
+    key_env: tuple[str, ...]  # env var(s) the key resolves from (help/display)
+    models: tuple[VendorModel, ...]  # curated; empty => free-form (Custom)
+    aliases: tuple[str, ...]  # accepted CLI synonyms (e.g. ("gemini",) for google)
+    allow_custom_model: bool  # offer a "custom model (enter model + dims)" entry
 
 
-# Seed presets. Each (model, dimensions) below was LIVE-VERIFIED against the
-# vendor's `/embeddings` endpoint (2026-06): the request succeeds and returns
-# exactly `embedding_dimensions` floats. Re-verify with a real call before
-# changing a value -- a stale dim degrades to a C1 error, not silent corruption.
-# NO DeepSeek (no embeddings API). Qwen3-Embedding is offered ONLY via
-# SiliconFlow's OpenAI-compatible endpoint (never a dashscope-native preset).
-# The curated SiliconFlow rows span the price/quality range; "Custom" remains
-# the generic escape hatch for any other OpenAI-compatible endpoint or model.
-EMBEDDING_PRESETS: list[VendorPreset] = [
-    VendorPreset(
-        name="SiliconFlow · BAAI/bge-m3",
-        base_url="https://api.siliconflow.cn/v1",
-        embedding_model="BAAI/bge-m3",
-        embedding_dimensions=1024,
-        key_url="https://cloud.siliconflow.cn",
+# Single source of truth for the two-layer vendor->model setup UX. Pure data:
+# adding/updating a model is one ``VendorModel`` edit, no code change. Each cloud
+# ``(model, dimensions)`` was LIVE-VERIFIED (2026-06); editing a dimension
+# REQUIRES re-running ``scripts/verify_vendor_catalog.py`` (CONTRIBUTING gate).
+# gemini/dashscope/local reuse the shipping ``EMBEDDING_MODEL_DEFAULTS`` (the
+# runtime authority) -- a consistency test pins catalog<->runtime agreement.
+# Exactly one model per non-Custom vendor is ``recommended=True``. NO DeepSeek
+# (no embeddings API). Qwen3-Embedding is offered ONLY via SiliconFlow's
+# OpenAI-compatible endpoint; "Custom" is the free-form escape hatch.
+VENDOR_CATALOG: tuple[Vendor, ...] = (
+    Vendor(
+        key="google",
+        label="Google (Gemini)",
+        provider="gemini",
+        base_url=None,
         requires_key=True,
-        note="multilingual · cheapest · default (fixed 1024)",
+        key_url="https://aistudio.google.com/apikey",
+        key_env=("GEMINI_API_KEY",),
+        models=(
+            VendorModel("gemini-embedding-001", 768, "default", recommended=True),
+        ),
+        aliases=("gemini",),
+        allow_custom_model=True,
     ),
-    VendorPreset(
-        name="SiliconFlow · Qwen3-Embedding-0.6B",
-        base_url="https://api.siliconflow.cn/v1",
-        embedding_model="Qwen/Qwen3-Embedding-0.6B",
-        embedding_dimensions=1024,
-        key_url="https://cloud.siliconflow.cn",
+    Vendor(
+        key="dashscope",
+        label="Alibaba DashScope (Qwen)",
+        provider="dashscope",
+        base_url=None,
         requires_key=True,
-        note="fast · low cost · MRL (resizable)",
+        key_url="https://bailian.console.aliyun.com/",
+        key_env=("DASHSCOPE_API_KEY",),
+        models=(
+            VendorModel("text-embedding-v4", 1024, "default", recommended=True),
+        ),
+        aliases=(),
+        allow_custom_model=True,
     ),
-    VendorPreset(
-        name="SiliconFlow · Qwen3-Embedding-8B",
-        base_url="https://api.siliconflow.cn/v1",
-        embedding_model="Qwen/Qwen3-Embedding-8B",
-        embedding_dimensions=2048,
-        key_url="https://cloud.siliconflow.cn",
-        requires_key=True,
-        note="best quality · MRL (native 4096)",
-    ),
-    VendorPreset(
-        name="Zhipu/GLM",
-        base_url="https://open.bigmodel.cn/api/paas/v4",
-        embedding_model="embedding-3",
-        embedding_dimensions=2048,
-        key_url="https://open.bigmodel.cn",
-        requires_key=True,
-        note="MRL · non-/v1 base (/api/paas/v4)",
-    ),
-    VendorPreset(
-        name="Ollama (local)",
-        base_url="http://localhost:11434/v1",
-        embedding_model="nomic-embed-text",
-        embedding_dimensions=768,
-        key_url="",
+    Vendor(
+        key="local",
+        label="Local (offline, no key)",
+        provider="local",
+        base_url=None,
         requires_key=False,
-        note="local · no key · free (fixed 768)",
-    ),
-    VendorPreset(
-        name="Custom",
-        base_url="",
-        embedding_model="",
-        embedding_dimensions=0,
         key_url="",
-        requires_key=True,
-        note="any other OpenAI-compatible endpoint",
+        key_env=(),
+        models=(
+            VendorModel("all-MiniLM-L6-v2", 384, "offline", recommended=True),
+        ),
+        aliases=(),
+        allow_custom_model=False,
     ),
-]
+    Vendor(
+        key="siliconflow",
+        label="SiliconFlow",
+        provider="openai-compatible",
+        base_url="https://api.siliconflow.cn/v1",
+        requires_key=True,
+        key_url="https://cloud.siliconflow.cn",
+        key_env=("ZOTPILOT_EMBEDDING_API_KEY", "OPENAI_API_KEY"),
+        models=(
+            VendorModel(
+                "BAAI/bge-m3", 1024, "multilingual · cheapest", recommended=True
+            ),
+            VendorModel("Qwen/Qwen3-Embedding-0.6B", 1024, "fast · low cost · MRL"),
+            VendorModel("Qwen/Qwen3-Embedding-8B", 2048, "best quality · MRL"),
+        ),
+        aliases=(),
+        allow_custom_model=True,
+    ),
+    Vendor(
+        key="zhipu",
+        label="Zhipu (GLM)",
+        provider="openai-compatible",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        requires_key=True,
+        key_url="https://open.bigmodel.cn",
+        key_env=("ZOTPILOT_EMBEDDING_API_KEY", "OPENAI_API_KEY"),
+        models=(
+            VendorModel("embedding-3", 2048, "MRL · non-/v1 base", recommended=True),
+        ),
+        aliases=(),
+        allow_custom_model=True,
+    ),
+    Vendor(
+        key="ollama",
+        label="Ollama (local, no key)",
+        provider="openai-compatible",
+        base_url="http://localhost:11434/v1",
+        requires_key=False,
+        key_url="",
+        key_env=(),
+        models=(
+            VendorModel("nomic-embed-text", 768, "local · free", recommended=True),
+        ),
+        aliases=(),
+        allow_custom_model=True,
+    ),
+    Vendor(
+        key="custom",
+        label="Custom (OpenAI-compatible)",
+        provider="openai-compatible",
+        base_url="",  # user-supplied; the only intentionally-empty fixed base_url
+        requires_key=True,
+        key_url="",
+        key_env=("ZOTPILOT_EMBEDDING_API_KEY", "OPENAI_API_KEY"),
+        models=(),  # free-form: model + dimensions entered by the user
+        aliases=("openai-compatible",),
+        allow_custom_model=True,
+    ),
+)
+
+
+def recommended_model(vendor: Vendor) -> VendorModel | None:
+    """Return the vendor's pre-selected default model (or None for free-form)."""
+    for vm in vendor.models:
+        if vm.recommended:
+            return vm
+    return vendor.models[0] if vendor.models else None
+
+
+def resolve_vendor(key_or_alias: str | None) -> Vendor | None:
+    """Resolve a vendor by canonical key OR alias, case-insensitively.
+
+    Returns ``None`` when nothing matches (the caller decides how to error).
+    """
+    if not key_or_alias:
+        return None
+    needle = key_or_alias.strip().lower()
+    for vendor in VENDOR_CATALOG:
+        if needle == vendor.key.lower():
+            return vendor
+        if any(needle == alias.lower() for alias in vendor.aliases):
+            return vendor
+    return None
+
+
+def vendor_cli_choices() -> list[str]:
+    """All accepted ``--provider`` values: canonical keys + aliases.
+
+    Deliberately EXCLUDES ``none`` (the No-RAG sentinel), matching the historical
+    argparse choices. Order: each vendor's key followed by its aliases.
+    """
+    choices: list[str] = []
+    for vendor in VENDOR_CATALOG:
+        choices.append(vendor.key)
+        choices.extend(vendor.aliases)
+    return choices
+
+
+def resolve_setup_choice(
+    key_or_alias: str,
+    model: str | None = None,
+    dims: int | None = None,
+    base_url: str | None = None,
+) -> tuple[str, str | None, str, int]:
+    """Map a (vendor, model?, dims?, base_url?) setup choice to runtime fields.
+
+    The SINGLE vendor->runtime resolver shared by BOTH the interactive wizard
+    and the non-interactive CLI (no duplicated mapping logic). Returns
+    ``(provider, base_url, model, dims)`` where ``provider`` is a member of
+    :data:`EMBEDDING_PROVIDERS` and ``base_url`` is ``None`` for the
+    gemini/dashscope/local providers.
+
+    Resolution:
+
+    - ``model`` omitted -> the vendor's ``recommended`` model (and its dims).
+    - ``dims`` omitted -> the catalog dims for ``(vendor, model)`` when known.
+    - ``base_url`` omitted -> the vendor's fixed ``base_url``.
+
+    Raises ``ValueError`` when a required value cannot be determined: an unknown
+    vendor; an openai-compatible vendor with no resolvable ``base_url`` (Custom
+    without ``--embedding-base-url``); no model for a free-form vendor; or
+    ``dims`` required but absent (Custom, or a model not in the curated list --
+    we cannot guess a non-matryoshka model's native dimension).
+    """
+    vendor = resolve_vendor(key_or_alias)
+    if vendor is None:
+        raise ValueError(
+            f"Unknown vendor/provider {key_or_alias!r}. "
+            f"Valid choices: {', '.join(vendor_cli_choices())}."
+        )
+
+    resolved_model = (model or "").strip() or None
+    catalog_dims: int | None = None
+    if resolved_model:
+        for vm in vendor.models:
+            if vm.model == resolved_model:
+                catalog_dims = vm.dimensions
+                break
+    else:
+        rec = recommended_model(vendor)
+        if rec is not None:
+            resolved_model = rec.model
+            catalog_dims = rec.dimensions
+
+    resolved_dims = dims if dims is not None else catalog_dims
+    # base_url: an explicit override wins; else the vendor's fixed base_url.
+    # vendor.base_url == "" (Custom) is treated as "unset" so the user must give one.
+    resolved_base = (base_url or "").strip() or (vendor.base_url or None)
+
+    if vendor.provider == "openai-compatible" and not resolved_base:
+        raise ValueError(
+            f"--embedding-base-url is required for vendor {vendor.key!r} "
+            f"(OpenAI-compatible endpoint root, e.g. http://localhost:11434/v1)."
+        )
+    if not resolved_model:
+        raise ValueError(
+            f"--embedding-model is required for vendor {vendor.key!r} "
+            f"(free-form vendor has no recommended default)."
+        )
+    if resolved_dims is None:
+        raise ValueError(
+            f"--embedding-dimensions is required for vendor {vendor.key!r} with "
+            f"model {resolved_model!r}: it is not a curated catalog model, so its "
+            f"output dimension cannot be guessed (non-matryoshka servers ignore a "
+            f"requested size and return their native dimension). Set it explicitly."
+        )
+    return vendor.provider, resolved_base, resolved_model, resolved_dims
 
 # Anchored full-match: ``{env:NAME}`` where NAME is a valid env-var identifier.
 # Anything that does not match exactly (``{env:}``, ``{env:FOO``, ``{ENV:FOO}``)

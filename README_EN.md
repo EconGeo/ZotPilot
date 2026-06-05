@@ -165,15 +165,37 @@ For `openai-compatible`, set `embedding_base_url` to the vendor's OpenAI-compati
 
 > **Provider-switch note**: changing the embedding provider / model / dimensions on an existing library requires `zotpilot index --force` to rebuild. The old vectors remain until then (no silent data loss), but search quality may degrade in the meantime.
 
-Non-interactive (agent-driven):
+Interactive `zotpilot setup` is now **two layers**: pick a **vendor**, then a **model**
+(the recommended one is pre-selected — just press Enter). Vendor → model map (single source of
+truth `VENDOR_CATALOG`):
+
+| vendor (alias) | runtime provider | base_url | key | recommended model · dims |
+|---|---|---|:---:|---|
+| `google` (`gemini`) | `gemini` | — | ✓ | `gemini-embedding-001` · 768 |
+| `dashscope` | `dashscope` | — | ✓ | `text-embedding-v4` · 1024 |
+| `local` | `local` | — | ✗ | `all-MiniLM-L6-v2` · 384 |
+| `siliconflow` | `openai-compatible` | `https://api.siliconflow.cn/v1` | ✓ | `BAAI/bge-m3` · 1024 |
+| `zhipu` | `openai-compatible` | `https://open.bigmodel.cn/api/paas/v4` | ✓ | `embedding-3` · 2048 |
+| `ollama` | `openai-compatible` | `http://localhost:11434/v1` | ✗ | `nomic-embed-text` · 768 |
+| `custom` (`openai-compatible`) | `openai-compatible` | you supply | ✓ | you supply model + dims |
+
+Non-interactive (agent-driven) — one line by vendor name; omit `--embedding-model` to take the
+recommended model; fixed-base vendors auto-fill base_url and dimensions:
 
 ```bash
+zotpilot setup --list-vendors            # list all vendors/models (add --json for agents)
+zotpilot setup --non-interactive --provider siliconflow --embedding-model BAAI/bge-m3 --embedding-key <key> --verify
+zotpilot setup --non-interactive --provider zhipu --embedding-key <key> --verify      # omit model -> recommended embedding-3
 zotpilot setup --non-interactive --provider gemini   # or dashscope / local
-# openai-compatible requires explicit base_url / model / dimensions (key optional for local Ollama):
-zotpilot setup --non-interactive --provider openai-compatible \
-  --embedding-base-url https://api.siliconflow.cn/v1 \
-  --embedding-model BAAI/bge-m3 --embedding-dimensions 1024 --embedding-key <key>
+# the custom vendor still needs explicit base_url / model / dimensions (key optional for local Ollama):
+zotpilot setup --non-interactive --provider custom \
+  --embedding-base-url http://localhost:11434/v1 \
+  --embedding-model nomic-embed-text --embedding-dimensions 768
+# legacy scripts keep working: --provider gemini|dashscope|local|openai-compatible are accepted aliases
 ```
+
+> `--verify` (optional): after writing config, runs one self-check and prints a single JSON line
+> (`ok` / `dim_mismatch` / `auth` / `unreachable` / `error` / `skipped`) so an agent can self-heal.
 
 </details>
 

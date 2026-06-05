@@ -62,11 +62,19 @@ def _import_register_secret_overrides(args, config_path: Path) -> bool:
 
 
 class ProbeResult(NamedTuple):
-    """Outcome of a connectivity self-check against an openai-compatible endpoint."""
+    """Outcome of a connectivity self-check against an openai-compatible endpoint.
+
+    ``state`` classifies the outcome for the machine-readable ``--verify`` JSON
+    taxonomy: ``ok`` | ``dim_mismatch`` | ``auth`` | ``unreachable`` | ``error``
+    (``skipped`` is produced by the caller for non-wire-probeable providers, not
+    by ``_probe_endpoint`` itself). The wizard self-check only reads ``ok`` /
+    ``returned_dim`` / ``message``; ``state`` is additive and defaults to ``ok``.
+    """
 
     ok: bool
     message: str
     returned_dim: int | None
+    state: str = "ok"
 
 
 def _probe_endpoint(
@@ -80,7 +88,15 @@ def _probe_endpoint(
 
     Sends ONE embed request (not ``GET /models``) so it can compare the returned
     vector length against the user-entered ``dims`` and surface a C1 mismatch at
-    setup time. Never raises; all failures are reported via ``ProbeResult.ok``.
+    setup time. Never raises; all failures are reported via ``ProbeResult``.
+
+    Mirrors the runtime embedder's dimensions-drop-on-400 fallback
+    (``openai_compat.py``): a fixed-dimension model (e.g. SiliconFlow ``bge-m3``)
+    rejects the ``dimensions`` parameter with HTTP 400, so on a 400 we retry ONCE
+    without ``dimensions`` and classify on the no-dims response length -- otherwise
+    such a model would false-fail the self-check even though it indexes fine.
+    HTTP 401/403 -> ``auth``; connect/timeout -> ``unreachable``; anything else
+    -> ``error``, each kept DISTINCT so the Agent gets correct remediation.
     """
     import httpx
 
@@ -88,17 +104,30 @@ def _probe_endpoint(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": model,
-        "input": "ping",
-        "dimensions": dims,
-        "encoding_format": "float",
-    }
-    try:
+
+    def _post(send_dimensions: bool) -> dict:
+        payload: dict = {
+            "model": model,
+            "input": "ping",
+            "encoding_format": "float",
+        }
+        if send_dimensions:
+            payload["dimensions"] = dims
         with httpx.Client(timeout=timeout) as client:
             response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
-            data = response.json()
+            return response.json()
+
+    try:
+        try:
+            data = _post(send_dimensions=True)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                # Fixed-dimension endpoint rejecting `dimensions`; retry once
+                # without it and classify on the native response length.
+                data = _post(send_dimensions=False)
+            else:
+                raise
         vec = data["data"][0]["embedding"]
         returned_dim = len(vec) if isinstance(vec, list) else None
         if returned_dim is not None and returned_dim != dims:
@@ -108,90 +137,252 @@ def _probe_endpoint(
                 f"embedding_dimensions={dims}. Set embedding_dimensions to {returned_dim} "
                 f"to match the server's native output.",
                 returned_dim,
+                "dim_mismatch",
             )
         return ProbeResult(
             True,
             f"Connectivity OK — endpoint returned {returned_dim}-dimensional vectors.",
             returned_dim,
+            "ok",
         )
-    except httpx.ConnectError:
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        if status in (401, 403):
+            return ProbeResult(
+                False,
+                f"Authentication failed (HTTP {status}). Check the API key for "
+                f"{base_url}.",
+                None,
+                "auth",
+            )
+        return ProbeResult(
+            False,
+            f"HTTP {status} from {url}: {e.response.text[:200]}",
+            None,
+            "error",
+        )
+    except (httpx.ConnectError, httpx.TimeoutException):
         return ProbeResult(
             False,
             f"Cannot reach {base_url}. Is the server running? "
             f"For Ollama, try `ollama serve`, then `ollama pull {model}`.",
             None,
+            "unreachable",
         )
     except Exception as e:  # noqa: BLE001 — self-check must never crash setup
-        return ProbeResult(False, f"Self-check failed: {e}", None)
+        return ProbeResult(False, f"Self-check failed: {e}", None, "error")
 
 
-def _prompt_openai_compatible() -> tuple[str, str, int, str | None]:
-    """Interactive preset sub-menu for the openai-compatible provider (Decision 7).
+def _vendor_catalog_payload() -> dict:
+    """Build the versioned ``--list-vendors --json`` envelope from VENDOR_CATALOG.
 
-    Returns ``(base_url, embedding_model, embedding_dimensions, api_key)``. The
-    api_key is collected INLINE here, so the per-provider key-prompt chain must
-    skip ``openai-compatible``.
+    The Agent's discovery contract (D6.1). ``schema_version`` decouples the skill
+    from ``Vendor``/``VendorModel`` field churn; the skill asserts it before
+    parsing. ``.vendors`` mirrors VENDOR_CATALOG exactly (a test pins equality).
     """
-    presets = providers.EMBEDDING_PRESETS
-    print("\n  OpenAI-compatible embedding endpoint.")
-    print("  Choose a preset (auto-fills base_url / model / dimensions):")
-    for i, preset in enumerate(presets, 1):
-        detail = f" ({preset.embedding_dimensions}d)" if preset.embedding_dimensions else ""
-        hint = f"  [{preset.note}]" if preset.note else ""
-        print(f"    {i}. {preset.name}{detail}{hint}")
-    sel = input(f"  Choice [1-{len(presets)}]: ").strip()
-    try:
-        preset = presets[int(sel) - 1]
-    except (ValueError, IndexError):
-        preset = presets[-1]  # default to Custom
+    return {
+        "schema_version": 1,
+        "vendors": [
+            {
+                "key": v.key,
+                "label": v.label,
+                "provider": v.provider,
+                "base_url": v.base_url,
+                "requires_key": v.requires_key,
+                "key_url": v.key_url,
+                "aliases": list(v.aliases),
+                "allow_custom_model": v.allow_custom_model,
+                "models": [
+                    {
+                        "model": m.model,
+                        "dimensions": m.dimensions,
+                        "note": m.note,
+                        "recommended": m.recommended,
+                    }
+                    for m in v.models
+                ],
+            }
+            for v in providers.VENDOR_CATALOG
+        ],
+    }
 
-    is_custom = not preset.base_url
+
+def _print_vendor_catalog(as_json: bool) -> int:
+    """Print the vendor catalog for Agent/human discovery (D6.1). Returns 0.
+
+    Short-circuits ``cmd_setup`` BEFORE any Zotero detection so it works on a
+    machine with no Zotero install (the MCP server may not be configured yet).
+    """
+    if as_json:
+        print(json.dumps(_vendor_catalog_payload(), ensure_ascii=False, indent=2))
+        return 0
+    print("Available embedding vendors (vendor → model):")
+    for v in providers.VENDOR_CATALOG:
+        key_note = "no key" if not v.requires_key else "requires key"
+        alias_note = f" (aliases: {', '.join(v.aliases)})" if v.aliases else ""
+        print(f"\n  {v.key} — {v.label} [{v.provider}, {key_note}]{alias_note}")
+        if v.base_url:
+            print(f"    base_url: {v.base_url}")
+        if v.key_url:
+            print(f"    key: {v.key_url}")
+        if v.models:
+            for m in v.models:
+                star = " ★ recommended" if m.recommended else ""
+                hint = f" [{m.note}]" if m.note else ""
+                print(f"    - {m.model} ({m.dimensions}d){hint}{star}")
+        if v.allow_custom_model:
+            print("    - <custom model> (enter model + dimensions)")
+    print("\nConfigure with: zotpilot setup --non-interactive --provider <vendor> "
+          "[--embedding-model <m>] [--verify]")
+    return 0
+
+
+def _prompt_vendor_model(vendor) -> tuple[str | None, str, int, str | None]:
+    """Interactive Layer-2 model selection for a chosen vendor.
+
+    Returns ``(base_url, embedding_model, embedding_dimensions, api_key)`` where
+    ``base_url`` is ``None`` for the gemini/dashscope/local providers and the
+    ``api_key`` is collected INLINE only for openai-compatible-mapped vendors
+    (gemini/dashscope keys are collected by the vendor-aware Step 3, local/ollama
+    need none). All paths normalize through ``providers.resolve_setup_choice``.
+    """
+    is_oai = vendor.provider == "openai-compatible"
+    is_custom = is_oai and not vendor.base_url  # free-form Custom vendor
+
+    # base_url: fixed (overridable) for siliconflow/zhipu/ollama; free-form for
+    # Custom; not applicable (None) for gemini/dashscope/local.
+    base_url: str | None = vendor.base_url or None
     if is_custom:
-        print("\n  Custom endpoint. base_url is the OpenAI-compatible root")
+        print("\n  Custom OpenAI-compatible endpoint. base_url is the API root")
         print("  (usually ends in /v1, e.g. http://localhost:11434/v1; GLM uses /api/paas/v4).")
-        base_url = input("  base_url: ").strip()
-        embedding_model = input("  embedding_model: ").strip()
+        base_url = input("  base_url: ").strip() or None
+    elif is_oai:
+        entered = input(f"  base_url [{vendor.base_url}]: ").strip()
+        if entered and entered != vendor.base_url:
+            # Mirror the non-interactive override WARNING so both surfaces guide
+            # the user identically when diverging from the vetted endpoint.
+            print(
+                f"  WARNING: overriding the built-in base_url for '{vendor.key}' "
+                f"({vendor.base_url}). The self-check still catches a dimension "
+                f"mismatch, but a wrong-but-same-dimension endpoint cannot be detected."
+            )
+        base_url = entered or vendor.base_url
+
+    # Layer-2 model menu.
+    chosen_model: str | None = None
+    chosen_dims: int | None = None
+    custom_idx: int | None = None
+    if vendor.models:
+        print(f"\n  Choose a {vendor.label} model (press Enter for the recommended one):")
+        rec = providers.recommended_model(vendor)
+        for i, m in enumerate(vendor.models, 1):
+            star = " ★ recommended" if m.recommended else ""
+            hint = f"  [{m.note}]" if m.note else ""
+            print(f"    {i}. {m.model} ({m.dimensions}d){star}{hint}")
+        if vendor.allow_custom_model:
+            custom_idx = len(vendor.models) + 1
+            print(f"    {custom_idx}. Custom model (enter model + dimensions)")
+        # Default to the recommended model; a valid numeric pick overrides it,
+        # and the "Custom model" entry clears it to fall through to free-form.
+        if rec:
+            chosen_model, chosen_dims = rec.model, rec.dimensions
+        sel = input(f"  Choice [1-{custom_idx or len(vendor.models)}, Enter=recommended]: ").strip()
+        if custom_idx is not None and sel == str(custom_idx):
+            chosen_model = chosen_dims = None
+        elif sel:
+            try:
+                m = vendor.models[int(sel) - 1]
+                chosen_model, chosen_dims = m.model, m.dimensions
+            except (ValueError, IndexError):
+                pass  # keep the recommended default
+
+    if chosen_model is None:
+        # Custom vendor, or "Custom model" picked, or no curated models.
+        chosen_model = input("  embedding_model: ").strip()
         print("  embedding_dimensions must be set explicitly: non-matryoshka servers")
         print("  ignore a requested size and return their native dimension.")
         dims_raw = input("  embedding_dimensions: ").strip()
-    else:
-        print(f"\n  {preset.name} selected. Pre-filled values (press Enter to keep):")
-        base_url = input(f"  base_url [{preset.base_url}]: ").strip() or preset.base_url
-        embedding_model = (
-            input(f"  embedding_model [{preset.embedding_model}]: ").strip()
-            or preset.embedding_model
-        )
-        dims_raw = input(f"  embedding_dimensions [{preset.embedding_dimensions}]: ").strip()
+        try:
+            chosen_dims = int(dims_raw) if dims_raw else None
+        except ValueError:
+            chosen_dims = None
 
-    try:
-        embedding_dimensions = int(dims_raw) if dims_raw else preset.embedding_dimensions
-    except ValueError:
-        embedding_dimensions = preset.embedding_dimensions
-
+    # Vendor-aware key prompt (only for openai-compatible-mapped vendors here).
     api_key: str | None = None
-    if preset.requires_key or is_custom:
-        if preset.key_url:
-            print(f"  Get an API key at: {preset.key_url}")
-        api_key = input("  API key (leave blank if none): ").strip() or None
-    else:
-        print("  No API key needed for local Ollama.")
+    if is_oai:
+        if vendor.requires_key:
+            if vendor.key_url:
+                print(f"  Get an API key at: {vendor.key_url}")
+            api_key = input("  API key (leave blank if none): ").strip() or None
+        else:
+            print("  No API key needed for local Ollama.")
 
-    # U2: non-blocking connectivity self-check; offer to fix a dimension mismatch.
-    if base_url and embedding_model and embedding_dimensions > 0:
-        print("  Running connectivity self-check...")
-        probe = _probe_endpoint(base_url, api_key, embedding_model, embedding_dimensions)
-        print(f"  {'OK' if probe.ok else 'WARNING'}: {probe.message}")
-        if (
-            not probe.ok
-            and probe.returned_dim
-            and probe.returned_dim != embedding_dimensions
-        ):
-            if input(
-                f"  Update embedding_dimensions to {probe.returned_dim}? [Y/n] "
-            ).strip().lower() not in ("n", "no"):
-                embedding_dimensions = probe.returned_dim
+    # Normalize through the shared resolver (fills recommended/base defaults,
+    # validates required dims) -- the SAME mapping the non-interactive CLI uses.
+    try:
+        _provider, base_url, chosen_model, chosen_dims = providers.resolve_setup_choice(
+            vendor.key, chosen_model, chosen_dims, base_url
+        )
+    except ValueError as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        return base_url, chosen_model or "", chosen_dims or 0, api_key
 
-    return base_url, embedding_model, embedding_dimensions, api_key
+    # U2: non-blocking connectivity self-check (openai-compatible-mapped vendors
+    # only); print that it makes ONE tiny embedding call, with a skip affordance.
+    if is_oai and base_url and chosen_model and chosen_dims > 0:
+        if input(
+            "  Run a connectivity self-check now? It makes one tiny embedding "
+            "call. [Y/n] "
+        ).strip().lower() not in ("n", "no"):
+            probe = _probe_endpoint(base_url, api_key, chosen_model, chosen_dims)
+            print(f"  {'OK' if probe.ok else 'WARNING'}: {probe.message}")
+            if (
+                not probe.ok
+                and probe.returned_dim
+                and probe.returned_dim != chosen_dims
+            ):
+                if input(
+                    f"  Update embedding_dimensions to {probe.returned_dim}? [Y/n] "
+                ).strip().lower() not in ("n", "no"):
+                    chosen_dims = probe.returned_dim
+
+    return base_url, chosen_model, chosen_dims, api_key
+
+
+def _run_setup_verify(
+    provider: str,
+    base_url: str | None,
+    api_key: str | None,
+    model: str | None,
+    dims: int | None,
+) -> tuple[dict, int]:
+    """Opt-in ``--verify`` pre-flight of the candidate (model, dims) (D6.3).
+
+    Returns ``(payload, exit_code)``. Only ``dim_mismatch`` exits non-zero -- it
+    is the one deterministic "config is wrong" signal the Agent can self-heal
+    from. ``auth``/``unreachable``/``error``/``skipped`` all exit 0 so surface ③
+    (CI, no reachable endpoint) stays headless-safe. Non-wire-probeable providers
+    (gemini/dashscope/local) are ``skipped`` (the skill always passes ``--verify``).
+    """
+    if provider != "openai-compatible" or not base_url or not model or not dims:
+        return (
+            {
+                "verify": "skipped",
+                "reason": "provider not wire-probeable",
+                "expected_dim": dims,
+                "returned_dim": None,
+                "message": f"--verify skipped for provider {provider!r}.",
+            },
+            0,
+        )
+    probe = _probe_endpoint(base_url, api_key, model, dims)
+    payload = {
+        "verify": probe.state,
+        "expected_dim": dims,
+        "returned_dim": probe.returned_dim,
+        "message": probe.message,
+    }
+    return payload, (1 if probe.state == "dim_mismatch" else 0)
 
 
 def cmd_setup(args):
@@ -210,6 +401,12 @@ def cmd_setup(args):
                 f"Note: {opt} is not a setup argument — use interactive setup or config set instead:\n"
                 f"  zotpilot config set {config_key} <key>"
             )
+
+    # D6.1: `--list-vendors` is a pure catalog dump for Agent/human discovery.
+    # It MUST short-circuit BEFORE Zotero detection / provider validation so it
+    # works on a machine with no Zotero install and before setup is configured.
+    if getattr(args, "list_vendors", False):
+        return _print_vendor_catalog(as_json=getattr(args, "json", False))
 
     non_interactive = getattr(args, "non_interactive", False)
 
@@ -237,44 +434,43 @@ def cmd_setup(args):
             print(f"ERROR: zotero.sqlite not found at {zotero_path}", file=sys.stderr)
             return 1
 
-        # Provider from flag
-        embedding_provider = getattr(args, "provider", None) or "gemini"
-        valid_providers = [p for p in providers.EMBEDDING_PROVIDERS if p != "none"]
-        if embedding_provider not in valid_providers:
+        # Provider/vendor from flag (omitted -> gemini, preserving prior default).
+        vendor_arg = getattr(args, "provider", None) or "gemini"
+        vendor = providers.resolve_vendor(vendor_arg)
+        if vendor is None:
             print(
-                f"ERROR: Invalid provider '{embedding_provider}'. Must be one of: "
-                f"{', '.join(valid_providers)}.",
+                f"ERROR: Invalid provider '{vendor_arg}'. Must be one of: "
+                f"{', '.join(providers.vendor_cli_choices())}.",
                 file=sys.stderr,
             )
             return 1
 
-        if embedding_provider == "openai-compatible":
-            embedding_base_url = getattr(args, "embedding_base_url", None)
-            embedding_model = getattr(args, "embedding_model", None)
-            embedding_api_key = getattr(args, "embedding_key", None)
-            embedding_dimensions = getattr(args, "embedding_dimensions", None)
-            if embedding_dimensions is None:
-                print(
-                    "ERROR: --embedding-dimensions is required for "
-                    "--provider openai-compatible (non-matryoshka servers ignore a "
-                    "requested dimension; set it explicitly).",
-                    file=sys.stderr,
-                )
-                return 1
-            if not embedding_base_url:
-                print(
-                    "ERROR: --embedding-base-url is required for "
-                    "--provider openai-compatible.",
-                    file=sys.stderr,
-                )
-                return 1
-            if not embedding_model:
-                print(
-                    "ERROR: --embedding-model is required for "
-                    "--provider openai-compatible.",
-                    file=sys.stderr,
-                )
-                return 1
+        base_url_arg = getattr(args, "embedding_base_url", None)
+        # WARN (do not block) when overriding a fixed-base vendor's built-in URL.
+        if base_url_arg and vendor.base_url and base_url_arg.strip() != vendor.base_url:
+            print(
+                f"WARNING: --embedding-base-url overrides the built-in base_url for "
+                f"vendor '{vendor.key}' ({vendor.base_url}). The setup probe still "
+                f"catches a dimension mismatch, but a wrong-but-same-dimension "
+                f"endpoint cannot be detected.",
+                file=sys.stderr,
+            )
+        try:
+            (
+                embedding_provider,
+                embedding_base_url,
+                embedding_model,
+                embedding_dimensions,
+            ) = providers.resolve_setup_choice(
+                vendor_arg,
+                getattr(args, "embedding_model", None),
+                getattr(args, "embedding_dimensions", None),
+                base_url_arg,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        embedding_api_key = getattr(args, "embedding_key", None)
 
     else:
         # Interactive mode (original behavior)
@@ -301,27 +497,24 @@ def cmd_setup(args):
             if input("  Continue anyway? [y/N] ").strip().lower() not in ("y", "yes"):
                 return 1
 
-        # Choose embedding provider
-        print("\n[2/5] Choose embedding provider:")
-        print("  1. Gemini (recommended, requires API key)")
-        print("  2. DashScope / Bailian (Alibaba Cloud, requires API key)")
-        print("  3. Local (all-MiniLM-L6-v2, no API key needed)")
-        print("  4. OpenAI-compatible (SiliconFlow / Zhipu-GLM / Ollama / custom)")
-        choice = input("  Choice [1/2/3/4]: ").strip()
-        if choice == "2":
-            embedding_provider = "dashscope"
-        elif choice == "3":
-            embedding_provider = "local"
-        elif choice == "4":
-            embedding_provider = "openai-compatible"
-            (
-                embedding_base_url,
-                embedding_model,
-                embedding_dimensions,
-                embedding_api_key,
-            ) = _prompt_openai_compatible()
-        else:
-            embedding_provider = "gemini"
+        # Layer 1 — choose embedding vendor (from the single VENDOR_CATALOG).
+        print("\n[2/5] Choose embedding vendor:")
+        for i, v in enumerate(providers.VENDOR_CATALOG, 1):
+            key_note = "" if v.requires_key else "  · no key"
+            print(f"  {i}. {v.label}{key_note}")
+        sel = input(f"  Choice [1-{len(providers.VENDOR_CATALOG)}]: ").strip()
+        try:
+            chosen_vendor = providers.VENDOR_CATALOG[int(sel) - 1]
+        except (ValueError, IndexError):
+            chosen_vendor = providers.VENDOR_CATALOG[0]  # default: Google (Gemini)
+        embedding_provider = chosen_vendor.provider
+        # Layer 2 — model selection (+ base_url/key for openai-compatible vendors).
+        (
+            embedding_base_url,
+            embedding_model,
+            embedding_dimensions,
+            embedding_api_key,
+        ) = _prompt_vendor_model(chosen_vendor)
 
     # Step 3: Configure API key (interactive only)
     gemini_api_key = None
@@ -503,6 +696,25 @@ def cmd_setup(args):
         else:
             print("Client registration failed. Run `zotpilot doctor` for details.")
         print(f"Shared config lives in {config_path}. API keys, when configured, are stored in this file.")
+
+    # D6.3: opt-in `--verify` pre-flight. Meaningful only with --non-interactive
+    # (the interactive wizard already self-checks); a no-op note otherwise.
+    if getattr(args, "verify", False):
+        if not non_interactive:
+            print(
+                "Note: --verify is only meaningful with --non-interactive "
+                "(the interactive wizard already runs a self-check)."
+            )
+        else:
+            payload, verify_rc = _run_setup_verify(
+                embedding_provider,
+                embedding_base_url,
+                embedding_api_key,
+                embedding_model,
+                embedding_dimensions,
+            )
+            print(json.dumps(payload, ensure_ascii=False))
+            return verify_rc
 
     return 0 if registration_ok else 1
 
@@ -1350,8 +1562,20 @@ def main(argv: list[str] | None = None) -> int:
     sub_setup.add_argument("--zotero-dir", type=str, default=None, help="Zotero data directory path")
     sub_setup.add_argument(
         "--provider", type=str, default=None,
-        choices=[p for p in providers.EMBEDDING_PROVIDERS if p != "none"],
-        help="Embedding provider (default: gemini)",
+        choices=providers.vendor_cli_choices(),
+        help="Embedding vendor (default: gemini). See `setup --list-vendors`.",
+    )
+    sub_setup.add_argument(
+        "--list-vendors", action="store_true",
+        help="List the vendor→model catalog and exit (use --json for a machine-readable envelope)",
+    )
+    sub_setup.add_argument(
+        "--json", action="store_true",
+        help="With --list-vendors, emit the catalog as a JSON envelope",
+    )
+    sub_setup.add_argument(
+        "--verify", action="store_true",
+        help="After a --non-interactive write, probe the endpoint and print a JSON verify result",
     )
     sub_setup.add_argument(
         "--embedding-base-url", type=str, default=None,

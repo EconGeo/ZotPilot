@@ -46,30 +46,43 @@ uv run pytest tests/test_chunker.py    # Single test file
 6. Add config validation in `config.py` (provider-specific required fields).
 7. Add tests in `tests/test_embedder.py` and registry tests in `tests/test_provider_registry.py`.
 
-### Vendor preset catalog (`EMBEDDING_PRESETS`)
+### The vendor → model catalog (`VENDOR_CATALOG`)
 
-`providers.py` also holds `EMBEDDING_PRESETS` — a flat list of `VendorPreset`
-entries that **only** pre-fill the interactive setup wizard for the
-`openai-compatible` provider. They never appear at runtime, so they are
-best-effort and drift-tolerant: a stale preset just means "the user overrides the
-wrong default," not a crash (`Custom` is always a fallback).
+`providers.py` holds `VENDOR_CATALOG` — the **single source of truth** for the
+two-layer "vendor → model" setup UX. It is pure data and feeds ALL THREE setup
+surfaces with no drift: the interactive wizard menus, the non-interactive
+`--provider <vendor>` CLI, and the Agent skill (`ztp-setup`) via
+`zotpilot setup --list-vendors --json`. Vendors map a setup-time choice onto the
+runtime `embedding_provider` + `base_url`; the catalog **never appears at
+runtime** and is drift-tolerant (a stale dim degrades to a setup-probe warning /
+C1 error, never silent corruption).
 
-- To add/update a vendor or model: append or edit a `VendorPreset(name,
-  base_url, embedding_model, embedding_dimensions, key_url, requires_key, note)`.
-  Set `requires_key=False` for keyless local endpoints (e.g. Ollama). `note` is a
-  short value/positioning hint shown in the wizard menu (e.g. "best quality").
-  Multiple curated models for one vendor are just multiple rows (e.g. SiliconFlow
-  seeds `BAAI/bge-m3`, `Qwen3-Embedding-0.6B`, `Qwen3-Embedding-8B`).
-- **Each `(embedding_model, embedding_dimensions)` MUST be live-verified** against
-  the vendor's real `/embeddings` endpoint before committing — POST the model and
-  assert the response returns exactly that many floats. Do NOT trust docs alone:
-  e.g. SiliconFlow `bge-m3` returns HTTP 400 if `dimensions` is sent at all (it is
-  fixed-dim), while Qwen3-Embedding (MRL) honors it. A stale dim degrades to a C1
-  error at index time, not silent corruption, but a wrong seed is still a bad UX.
+**Principle-1 boundary (hard rule).** `VENDOR_CATALOG` / `resolve_setup_choice`
+(and the `Vendor`/`VendorModel` types) are SETUP-LAYER only. They MUST NEVER be
+imported by `config.py` or by any embedder in `embeddings/`. The runtime
+authority stays `EMBEDDING_PROVIDERS` + `EMBEDDING_MODEL_DEFAULTS`. A test in
+`tests/test_provider_registry.py` asserts `config.py` does not import the catalog
+symbols — keep it green.
+
+- **Adding/updating a model is ONE data edit.** Append or edit a
+  `VendorModel(model, dimensions, note="", recommended=False)` inside the right
+  `Vendor`'s `models=(...)`. No code change, and no test menu-index churn (the
+  tests compute indices dynamically). Exactly one model per non-Custom vendor is
+  `recommended=True`. Adding a model automatically flows to
+  `setup --list-vendors` and the `ztp-setup` skill — **no skill edit needed**.
+  Adding a whole vendor is one `Vendor(...)` tuple (a consistency test pins
+  `vendor.provider ∈ EMBEDDING_PROVIDERS`).
+- **MANDATORY drift gate on any `dimensions` edit.** Whenever you add or change a
+  model's `dimensions`, you MUST run `python scripts/verify_vendor_catalog.py`
+  with the relevant API keys in env BEFORE committing. It live-POSTs each
+  `(model, dimensions)` (mirroring the runtime dimensions-drop-on-400 fallback)
+  and fails on a length mismatch. It is the ONLY value-correctness check for the
+  high-churn OpenAI-compatible rows and is **not in CI** (needs keys + network);
+  keyless/unset vendors are skipped with a logged note.
 - **Do NOT add chat-only vendors** that have no embeddings API (e.g. DeepSeek).
-  Qwen3-Embedding is offered ONLY via SiliconFlow's OpenAI-compatible endpoint
-  (`base_url` = SiliconFlow), never as a standalone dashscope-native preset — the
-  dedicated `dashscope` provider keeps Qwen's native asymmetric-retrieval path.
+  Qwen3-Embedding is offered ONLY via SiliconFlow's OpenAI-compatible endpoint,
+  never as a standalone dashscope-native row — the dedicated `dashscope` provider
+  keeps Qwen's native asymmetric-retrieval path.
 
 ## Adding a New MCP Tool
 

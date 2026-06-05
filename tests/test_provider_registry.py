@@ -175,49 +175,195 @@ class TestResolveSecret:
         assert providers._resolve_secret("{env:EMPTY_VAR}", "FALLBACK") == "fallback-value"
 
 
-class TestVendorPresets:
-    def test_contains_expected_vendors(self):
-        names = [p.name for p in providers.EMBEDDING_PRESETS]
-        assert any("SiliconFlow" in n for n in names)
-        assert any("Zhipu/GLM" in n for n in names)
-        assert any("Ollama" in n for n in names)
-        assert "Custom" in names
+class TestCatalogRuntimeConsistency:
+    """AC6: catalog recommended defaults agree with the runtime authority."""
 
-    def test_excludes_chat_only_vendors(self):
-        # DeepSeek has no embeddings API -- never a preset.
-        names = " ".join(p.name for p in providers.EMBEDDING_PRESETS).lower()
-        assert "deepseek" not in names
-        # Qwen3-Embedding is offered ONLY via SiliconFlow's OpenAI-compatible
-        # endpoint, never as a standalone dashscope-native preset.
-        for p in providers.EMBEDDING_PRESETS:
-            if "qwen" in p.embedding_model.lower():
-                assert "siliconflow" in p.base_url.lower()
+    @pytest.mark.parametrize("key", ["google", "dashscope", "local"])
+    def test_recommended_matches_runtime_defaults(self, key):
+        vendor = providers.resolve_vendor(key)
+        rec = providers.recommended_model(vendor)
+        assert (rec.model, rec.dimensions) == providers.EMBEDDING_MODEL_DEFAULTS[
+            vendor.provider
+        ]
 
-    def test_curated_siliconflow_models_have_verified_dims(self):
-        # (model -> dimensions) pairs LIVE-VERIFIED against SiliconFlow 2026-06.
-        verified = {
-            "BAAI/bge-m3": 1024,
-            "Qwen/Qwen3-Embedding-0.6B": 1024,
-            "Qwen/Qwen3-Embedding-8B": 2048,
-        }
-        sf = {
-            p.embedding_model: p.embedding_dimensions
-            for p in providers.EMBEDDING_PRESETS
-            if "siliconflow" in p.base_url.lower()
-        }
-        for model, dims in verified.items():
-            assert sf.get(model) == dims, f"{model} preset dims drifted"
+    def test_every_vendor_provider_in_allow_list(self):
+        for vendor in providers.VENDOR_CATALOG:
+            assert vendor.provider in providers.EMBEDDING_PROVIDERS
 
-    def test_ollama_requires_no_key(self):
-        ollama = next(p for p in providers.EMBEDDING_PRESETS if "Ollama" in p.name)
-        assert ollama.requires_key is False
 
-    def test_non_custom_presets_have_base_url(self):
-        for preset in providers.EMBEDDING_PRESETS:
-            if preset.name != "Custom":
-                assert preset.base_url
-                assert preset.embedding_model
-                assert preset.embedding_dimensions > 0
+class TestCatalogStructural:
+    """AC11: structural invariants checkable with no keys / no network (CI)."""
+
+    def test_all_model_dimensions_positive(self):
+        for vendor in providers.VENDOR_CATALOG:
+            for m in vendor.models:
+                assert m.dimensions > 0, f"{vendor.key}/{m.model} has non-positive dims"
+
+    def test_exactly_one_recommended_per_non_custom_vendor(self):
+        for vendor in providers.VENDOR_CATALOG:
+            if vendor.key == "custom":
+                assert vendor.models == ()
+                continue
+            recs = [m for m in vendor.models if m.recommended]
+            assert len(recs) == 1, f"{vendor.key} must have exactly one recommended model"
+
+    def test_oai_vendors_except_custom_have_fixed_base_url(self):
+        for vendor in providers.VENDOR_CATALOG:
+            if vendor.provider != "openai-compatible":
+                continue
+            if vendor.key == "custom":
+                assert vendor.base_url == ""  # user-supplied; intentionally empty
+            else:
+                assert vendor.base_url  # non-empty fixed base_url
+
+    def test_aliases_unique_across_vendors(self):
+        seen: set[str] = set()
+        for vendor in providers.VENDOR_CATALOG:
+            for token in (vendor.key, *vendor.aliases):
+                assert token not in seen, f"duplicate vendor token {token!r}"
+                seen.add(token)
+
+
+class TestPrinciple1ImportGuard:
+    """AC12: the setup-layer catalog must never be imported by config.py."""
+
+    def test_config_does_not_import_catalog_symbols(self):
+        import inspect
+
+        from zotpilot import config as config_module
+
+        source = inspect.getsource(config_module)
+        assert "VENDOR_CATALOG" not in source
+        assert "resolve_setup_choice" not in source
+
+
+class TestResolveVendor:
+    def test_canonical_key(self):
+        assert providers.resolve_vendor("siliconflow").key == "siliconflow"
+
+    def test_case_insensitive(self):
+        assert providers.resolve_vendor("SiliconFlow").key == "siliconflow"
+
+    def test_gemini_alias_maps_to_google(self):
+        assert providers.resolve_vendor("gemini").key == "google"
+
+    def test_openai_compatible_alias_maps_to_custom(self):
+        assert providers.resolve_vendor("openai-compatible").key == "custom"
+
+    def test_unknown_returns_none(self):
+        assert providers.resolve_vendor("nope") is None
+
+    def test_cli_choices_exclude_none_and_include_aliases(self):
+        choices = providers.vendor_cli_choices()
+        assert "none" not in choices
+        assert "gemini" in choices and "openai-compatible" in choices
+        assert choices == [
+            "google", "gemini", "dashscope", "local",
+            "siliconflow", "zhipu", "ollama", "custom", "openai-compatible",
+        ]
+
+    def test_qwen_only_under_siliconflow(self):
+        for vendor in providers.VENDOR_CATALOG:
+            for m in vendor.models:
+                if "qwen" in m.model.lower():
+                    assert vendor.key == "siliconflow"
+
+
+class TestResolveSetupChoice:
+    """AC13 + AC4: the single shared vendor->runtime resolver."""
+
+    def test_siliconflow_no_model_uses_recommended(self):
+        assert providers.resolve_setup_choice("siliconflow") == (
+            "openai-compatible", "https://api.siliconflow.cn/v1", "BAAI/bge-m3", 1024
+        )
+
+    def test_siliconflow_explicit_model_dims(self):
+        assert providers.resolve_setup_choice(
+            "siliconflow", model="Qwen/Qwen3-Embedding-8B"
+        ) == ("openai-compatible", "https://api.siliconflow.cn/v1",
+              "Qwen/Qwen3-Embedding-8B", 2048)
+
+    def test_zhipu_recommended(self):
+        assert providers.resolve_setup_choice("zhipu") == (
+            "openai-compatible", "https://open.bigmodel.cn/api/paas/v4",
+            "embedding-3", 2048
+        )
+
+    @pytest.mark.parametrize(
+        "key,expected",
+        [
+            ("gemini", ("gemini", None, "gemini-embedding-001", 768)),
+            ("dashscope", ("dashscope", None, "text-embedding-v4", 1024)),
+            ("local", ("local", None, "all-MiniLM-L6-v2", 384)),
+        ],
+    )
+    def test_legacy_values_map_to_right_provider(self, key, expected):
+        assert providers.resolve_setup_choice(key) == expected
+
+    def test_custom_missing_dims_raises(self):
+        with pytest.raises(ValueError, match="--embedding-dimensions"):
+            providers.resolve_setup_choice(
+                "custom", model="m", base_url="http://x/v1"
+            )
+
+    def test_custom_missing_base_url_raises(self):
+        with pytest.raises(ValueError, match="--embedding-base-url"):
+            providers.resolve_setup_choice("custom", model="m", dims=10)
+
+    def test_custom_free_form_no_model_raises(self):
+        with pytest.raises(ValueError, match="--embedding-model"):
+            providers.resolve_setup_choice("custom", base_url="http://x/v1", dims=10)
+
+    def test_unknown_vendor_raises(self):
+        with pytest.raises(ValueError, match="Unknown vendor"):
+            providers.resolve_setup_choice("bogus")
+
+    def test_openai_compatible_alias_equals_custom(self):
+        a = providers.resolve_setup_choice(
+            "openai-compatible", model="m", dims=10, base_url="http://x/v1"
+        )
+        b = providers.resolve_setup_choice(
+            "custom", model="m", dims=10, base_url="http://x/v1"
+        )
+        assert a == b
+
+    def test_unknown_model_for_known_vendor_requires_dims(self):
+        # Forward-compat: a model not in the curated list is allowed WITH dims.
+        assert providers.resolve_setup_choice(
+            "siliconflow", model="future-model", dims=999
+        ) == ("openai-compatible", "https://api.siliconflow.cn/v1",
+              "future-model", 999)
+        with pytest.raises(ValueError, match="--embedding-dimensions"):
+            providers.resolve_setup_choice("siliconflow", model="future-model")
+
+
+class TestCatalogIsDataDriven:
+    """AC9: registering a vendor/model is data-only (no cli.py/test edits)."""
+
+    def test_synthetic_vendor_flows_through(self, monkeypatch, capsys):
+        from zotpilot import cli
+
+        synthetic = providers.Vendor(
+            key="acme",
+            label="Acme Embeddings",
+            provider="openai-compatible",
+            base_url="https://acme.test/v1",
+            requires_key=True,
+            key_url="https://acme.test/keys",
+            key_env=("ACME_API_KEY",),
+            models=(providers.VendorModel("acme-embed-1", 256, "demo", recommended=True),),
+            aliases=(),
+            allow_custom_model=True,
+        )
+        patched = (*providers.VENDOR_CATALOG, synthetic)
+        monkeypatch.setattr(providers, "VENDOR_CATALOG", patched)
+
+        assert "acme" in providers.vendor_cli_choices()
+        assert providers.resolve_setup_choice("acme") == (
+            "openai-compatible", "https://acme.test/v1", "acme-embed-1", 256
+        )
+        cli._print_vendor_catalog(as_json=False)
+        assert "acme" in capsys.readouterr().out
 
 
 class TestConfigHashGoldenBaselines:
