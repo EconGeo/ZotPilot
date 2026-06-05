@@ -4789,7 +4789,7 @@ vision = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'vision'", specifier = ">=0.40.0" },
     { name = "chromadb", specifier = ">=0.4.0" },
-    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "fastmcp", specifier = ">=2.0.0,<4" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "httpx" },
     { name = "mypy", marker = "extra == 'dev'" },
@@ -4798,7 +4798,7 @@ requires-dist = [
     { name = "paddlepaddle", marker = "extra == 'paddle'", specifier = ">=3.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pymupdf", specifier = ">=1.25.0" },
-    { name = "pymupdf-layout" },
+    { name = "pymupdf-layout", specifier = ">=1.25.0" },
     { name = "pymupdf4llm", specifier = ">=0.0.17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
