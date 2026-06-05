@@ -2,31 +2,33 @@
 
 ## [Unreleased]
 
+**嵌入 provider 扩展 + 索引数据安全 / Embedding flexibility + index data-safety** — 通用 OpenAI 兼容 provider 与两层厂商配置、单篇 PDF 导读，以及一组 P0 索引数据安全修复。
+
+### ✨ Highlights
+- **通用 OpenAI 兼容嵌入 provider**：一套配置接入 SiliconFlow / Zhipu·GLM / Ollama / vLLM / 自建端点，换厂商只改 `base_url` + `model` + `dimensions`
+- **两层「厂商 → 模型」配置**：`zotpilot setup` 先选厂商再选模型，交互式 / 非交互式 / Agent skill 共用同一 `VENDOR_CATALOG`
+- **`ztp-tutor` 论文导读**：LLM 通读单篇 PDF，五色高亮 + 逐句中文批注直接写回 Zotero 的 PDF，全程本地
+- **索引数据安全（P0）**：索引打不开不再静默清空全库，新增 `doctor --recover-index` 零额度恢复
+- **嵌入 429 快速中止**：配额耗尽即停、保留已完成索引，不再烧穿整批
+
 ### Added
-
-- **两层「厂商 → 模型」配置 / Two-layer vendor → model setup** —— 配置体验重构为统一的两层模型，由 `providers.py` 中单一 `VENDOR_CATALOG` 驱动，**三个配置面**（交互式向导、非交互式 CLI、Agent skill）共用同一数据源、零漂移。交互式向导先选厂商（Google·Gemini / DashScope / Local / SiliconFlow / Zhipu·GLM / Ollama / Custom）再选模型（预选推荐项，回车即取）。非交互式支持按厂商名一行配置：`zotpilot setup --non-interactive --provider siliconflow --embedding-model BAAI/bge-m3`，固定 base 厂商自动带上 base_url 与维度，省略 `--embedding-model` 取推荐项。新增 `zotpilot setup --list-vendors [--json]`（Agent 查询目录的发现接口，带 `schema_version`）与可选的 `zotpilot setup --non-interactive --verify`（写入后做一次连通自检并打印一行 JSON 分类：`ok`/`dim_mismatch`/`auth`/`unreachable`/`error`/`skipped`，供 Agent 自愈）。旧脚本仍兼容：`--provider gemini|dashscope|local|openai-compatible` 作为别名继续有效；运行时 provider 集合、`config.json` schema 与 `_config_hash` 均未变（不触发重建索引）。`scripts/verify_vendor_catalog.py` 为目录维度改动的强制 live 校验门禁。/ Reworked setup into a unified two-layer vendor → model model backed by a single `VENDOR_CATALOG`, feeding the interactive wizard, the non-interactive CLI, and the `ztp-setup` Agent skill with no drift. Non-interactive now takes a vendor name (`--provider siliconflow --embedding-model BAAI/bge-m3`); fixed-base vendors auto-fill base_url + dimensions, and omitting `--embedding-model` picks the recommended one. Added `setup --list-vendors [--json]` (a versioned discovery contract for Agents) and opt-in `setup --non-interactive --verify` (one JSON line: ok/dim_mismatch/auth/unreachable/error/skipped). Legacy `--provider gemini|dashscope|local|openai-compatible` keep working as aliases; runtime provider set, `config.json` schema and `_config_hash` are unchanged (no forced reindex). `scripts/verify_vendor_catalog.py` is the mandatory drift gate for any catalog dimension change.
-
-- **通用 OpenAI 兼容嵌入 provider / Generic OpenAI-compatible embedding provider** —— 新增 `openai-compatible` 嵌入 provider，可对接任意 OpenAI 兼容的 `/embeddings` 端点（SiliconFlow、Zhipu/GLM、Ollama、vLLM、自建服务等），切换厂商只需配置 `embedding_base_url` + `embedding_model` + `embedding_dimensions`，无需新增代码。维度必须显式指定、永不自动探测（首个响应向量会做长度断言以防索引被静默破坏）。设置向导内置厂商预设（SiliconFlow / Zhipu·GLM / Ollama / Custom）。解决 Issue #12（嵌入部分），取代厂商专用的 Ollama PR #16（感谢 @EconGeo 提出并推动 Ollama 本地嵌入支持）。视觉（vision）的 OpenAI 兼容支持暂缓至后续 issue。/ Added a generic OpenAI-compatible embedding provider (Issue #12, embeddings half); supersedes vendor-specific Ollama PR #16 (thanks to @EconGeo for proposing and driving Ollama local-embedding support). Vision support deferred. 固定维度（非 matryoshka）端点若以 HTTP 400 拒绝 `dimensions` 参数（如 SiliconFlow `BAAI/bge-m3`），现会自动丢弃该参数并重试，无需额外配置。/ Fixed-dimension endpoints that reject the `dimensions` parameter with HTTP 400 (e.g. SiliconFlow bge-m3) are now auto-handled. 设置向导内置一组已 live 实测验证的 SiliconFlow 模型预设（`BAAI/bge-m3` 1024 / `Qwen3-Embedding-0.6B` 1024 / `Qwen3-Embedding-8B` 2048），菜单显示模型维度与定位；通用 Custom 项仍可对接任意端点。/ The setup wizard now seeds a curated, live-verified set of SiliconFlow models (bge-m3, Qwen3-Embedding-0.6B/8B) shown with dimensions, alongside the generic Custom option.
-
-- **自定义 Gemini base URL / Custom Gemini base URL**（Issue #11）—— Gemini 嵌入客户端支持自定义 endpoint，方便处于受限网络或使用 API 代理的用户。通过 `GEMINI_BASE_URL` 环境变量或 `zotpilot config set gemini_base_url <url>` 配置；底层透传给 `genai.Client` 的 `http_options`，未设置时使用 Google 官方 endpoint。
-
-- **`ztp-tutor` 论文导读 / Deep Reading Guide** —— 新增单篇论文深度导读功能。`/ztp-tutor <标题>` 模糊匹配本地 Zotero 文献后，由 LLM 通读全文，将五维彩色高亮（核心论点 / 关键概念 / 实证证据 / 让步反驳 / 方法论）、逐句中文批注、图表与公式标注，以及第 1 页的论证结构概览便签，直接写入 Zotero 存储的 PDF，可在 Zotero 阅读器中原地打开查看，全程本地。功能会按 `~/.config/zotpilot/ZOTPILOT.md` 中的"阅读画像"自适应调整批注密度与讲解层次（如英文偏弱时补充术语解释与长难句拆解），并尊重 PDF 中已有的人工批注（不重复、不覆盖）。每次写入前自动生成 `.ztpbak` 备份，经独立文件写入、多重校验与原子替换保证原文永不损坏、失败即回滚；跨 macOS / Linux / Windows 均经兼容性加固。配套提供声明式 skill 与 MCP 工具 `get_paper_for_tutor` / `annotate_pdf` / `save_reading_persona`。首次启用后建议在真实 Zotero 阅读器中目视确认中文便签与五色高亮渲染正常。
-
-- **`zotpilot doctor --recover-index` 索引零额度恢复** —— 从完好的 SQLite + HNSW 段（含被旧版本写坏、新核打不开的段）重建向量库，直接复用已有向量、**不产生任何嵌入 API 调用**；先写入新目录并通过校验门（数量 / 维度 / 自最近邻 / 探针）再原子换库，失败则保留原库不动。可用 `--source` 指定某个 `chroma.corrupt-*` 备份（省略则自动发现），`--dry-run` 预览；HNSW 不可读时可回退到从 SQLite 文本重嵌（需确认，会花嵌入额度）。
-- **`zotpilot doctor --reconcile` 显式对账** —— 预览 / 清理 Zotero 中已删除的孤儿索引文档；默认受删除下限保护，`--dry-run` 预览，`--force` 越过 25% 下限。
-- **可选依赖 extra `recover`**（`chroma-hnswlib`）—— 仅索引恢复路径需要；缺失时给出 `uv sync --extra recover` 提示并可回退重嵌。注意 Python 3.13 暂无预编译 wheel，需本机 C++ 编译器（或改用重嵌回退）。
+- **通用 OpenAI 兼容嵌入 provider**（Issue #12，嵌入部分）—— 新增 `openai-compatible` provider，对接任意 OpenAI 兼容 `/embeddings` 端点（SiliconFlow / Zhipu·GLM / Ollama / vLLM / 自建），换厂商只配 `embedding_base_url` + `embedding_model` + `embedding_dimensions`；维度必须显式指定、永不自动探测。取代厂商专用的 Ollama PR #16（感谢 @EconGeo）。固定维度端点（如 SiliconFlow `BAAI/bge-m3`）以 HTTP 400 拒绝 `dimensions` 时自动丢弃重试；vision 的 OpenAI 兼容支持暂缓至后续 issue
+- **两层「厂商 → 模型」配置** —— 由单一 `VENDOR_CATALOG` 驱动，交互式向导先选厂商再选模型，非交互式支持 `--provider siliconflow --embedding-model BAAI/bge-m3`（固定 base 厂商自动带 `base_url` + 维度）；新增 `setup --list-vendors [--json]` 与 `setup --non-interactive --verify`。旧 `--provider gemini|dashscope|local|openai-compatible` 仍作别名；运行时 provider 集合与 `_config_hash` 不变（不触发重建索引）
+- **自定义 Gemini base URL**（Issue #11）—— 通过 `GEMINI_BASE_URL` 或 `config set gemini_base_url` 指定 Gemini 端点，方便 API 代理 / 受限网络；仅接受 `https://`
+- **`ztp-tutor` 论文导读** —— `/ztp-tutor <标题>` 匹配本地文献后由 LLM 通读全文，将五维彩色高亮、逐句中文批注、图表 / 公式标注与论证结构便签写入 Zotero 的 PDF，按"阅读画像"自适应、尊重已有批注；写前自动 `.ztpbak` 备份、原子替换保证原文不损。配套 MCP 工具 `get_paper_for_tutor` / `annotate_pdf` / `save_reading_persona`
+- **`zotpilot doctor --recover-index`** —— 从完好 SQLite + HNSW 段重建向量库，复用已有向量、零嵌入 API 调用；先写新目录过校验门再原子换库，失败保留原库。`--source` 指定备份、`--dry-run` 预览，HNSW 不可读时可回退重嵌
+- **`zotpilot doctor --reconcile`** —— 预览 / 清理 Zotero 已删除的孤儿索引文档，受删除下限保护，`--force` 越过 25% 下限
+- **可选依赖 extra `recover`**（`chroma-hnswlib`）—— 仅索引恢复路径需要；缺失时提示 `uv sync --extra recover`（Python 3.13 暂无预编译 wheel，需 C++ 编译器或改用重嵌回退）
 
 ### Changed
-
-- **索引打不开不再自动「搬走 + 重建空库」**（破坏性行为变更）—— 旧版在探针失败时会把整库移到 `*.corrupt-*` 再原位重建空库，曾导致完好数据被静默清空。现在改为**报错并保留数据**（`IndexUnavailableError`），并引导运行 `zotpilot doctor --recover-index`。依赖「自动重建」的旧行为已移除。
+- **索引打不开不再自动「搬走 + 重建空库」**（破坏性变更）—— 旧版探针失败会把整库移走并原位重建空库、曾静默清空完好数据；现改为报错保留数据（`IndexUnavailableError`）并引导 `doctor --recover-index`
 
 ### Fixed
-
-- **P0 数据安全：索引「打不开即静默清空」**（根因 RC1/RC2）—— 旧逻辑用会加载 HNSW 的探针，遇被不同 chromadb 版本写坏的旧段时段错误（exit 139），随即把一个 SQLite 完好、向量在位的库判为损坏并清空。现探针改为**只读、不加载 HNSW、子进程带超时**；段错误判为「不可用」而**不再触发任何搬移 / 清空**，完好库不会被误删。
-- **批量误删保护**（RC6）—— 孤儿对账加入常开删除下限：当前库空读、数据目录不可达、或删除量超过索引的 25% 时，拒绝删除并响亮告警；`--force` / `allow_mass_delete` 仅放行比例下限，空读 / 不可达即便显式 override 仍拒删。
-- **嵌入维度不匹配**（RC7）—— 在 CLI 与 `doctor` 的索引构造处捕获 `EmbeddingDimensionMismatchError` / `IndexUnavailableError`，给出清晰可操作的提示而非未捕获崩溃。
-- **配置漂移**（RC8）—— 嵌入 / 分块 / 视觉等影响索引内容的配置变化且未 `--force` 时**硬阻断**（`ConfigDriftError`），避免静默写入混合嵌入空间的索引。
-- **嵌入 429 配额级联**（Issue #15）—— 嵌入服务返回 HTTP 429（配额 / 限流）时不再被当作普通失败逐篇记下并继续硬撞已耗尽的配额、烧掉整批。现在 429 被分类为带 `provider` / `retry_after` 的 `RateLimitError`：索引进入 Phase-3 后立即中止（`break`），当前篇及之后未尝试的论文统一记为 `failed`，运行正常返回（MCP lease 正常释放、已完成的索引完整保留、下次自动续跑）。另加一个与服务商无关的兜底——连续 3 篇相同特征失败也中止（`systemic_abort`，与 `rate_limited_abort` 区分，避免把非配额级联误标成限流）。DashScope 的 `RETRIEVAL_DOCUMENT` 批次遇 429 不再降级成逐条重试；表格 / 图片路径上的 429 也会上抛中止（已提交的正文 chunk 保留）。额外以 `counts["rate_limited_abort"] / ["systemic_abort"] / ["not_indexed_due_to_abort"]` 加性透出，不新增状态、不改退出码语义。
+- **P0 索引「打不开即静默清空」**（RC1/RC2）—— 探针改为只读、不加载 HNSW、子进程带超时；段错误判为「不可用」而不再搬移 / 清空完好库
+- **批量误删保护**（RC6）—— 孤儿对账常开删除下限：空读 / 数据目录不可达 / 删除超 25% 即拒删告警，`--force` 仅放行比例下限
+- **嵌入维度不匹配**（RC7）—— CLI 与 `doctor` 捕获 `EmbeddingDimensionMismatchError` / `IndexUnavailableError`，给出可操作提示而非崩溃
+- **配置漂移**（RC8）—— 影响索引内容的配置变化且未 `--force` 时硬阻断（`ConfigDriftError`），避免混合嵌入空间
+- **嵌入 429 配额级联**（Issue #15）—— 429 分类为带 `provider` / `retry_after` 的 `RateLimitError`：索引立即中止、未处理论文记为 `failed`、已完成索引保留、lease 正常释放；另加连续 3 篇同特征失败的兜底中止（`systemic_abort`）。以 `counts["rate_limited_abort"] / ["systemic_abort"] / ["not_indexed_due_to_abort"]` 透出
 
 ## 如何更新 / How to Update
 
