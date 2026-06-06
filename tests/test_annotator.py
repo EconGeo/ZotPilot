@@ -178,9 +178,15 @@ def test_normalize_strips_markdown_emphasis_and_markers():
     assert normalize_quote_for_pdf("- bullet item text") == "bullet item text"
     assert normalize_quote_for_pdf("1. first numbered item") == "first numbered item"
     assert normalize_quote_for_pdf("use `code` inline here") == "use code inline here"
-    # single _ / * preserved (snake_case identifiers, lone asterisks)
+    # _ / * are stripped only as emphasis DELIMITERS (not flanked by alnum on both
+    # sides); intra-word _ / * (snake_case, subscripts, a*b) are preserved.
     assert normalize_quote_for_pdf("snake_case_id intact") == "snake_case_id intact"
     assert normalize_quote_for_pdf("a*b kept") == "a*b kept"
+    assert normalize_quote_for_pdf("the variable x_t here") == "the variable x_t here"
+    # single-underscore italics (pymupdf4llm) ARE stripped so they match the PDF text layer
+    assert normalize_quote_for_pdf("JEPA is _not generative_ here") == "JEPA is not generative here"
+    assert normalize_quote_for_pdf("we advocate _against_ it") == "we advocate against it"
+    assert normalize_quote_for_pdf("*italic* lead") == "italic lead"
     # idempotent with markdown present
     s = "**bold** ## h `c` text_id"
     assert normalize_quote_for_pdf(normalize_quote_for_pdf(s)) == normalize_quote_for_pdf(s)

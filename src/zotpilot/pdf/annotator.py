@@ -137,13 +137,15 @@ _UNICODE_QUOTE_MAP = {
 _WHITESPACE_RE = re.compile(r"\s+")
 _HYPHEN_LINEBREAK_RE = re.compile(r"(\w)-\s*\n\s*(\w)")
 
-# pymupdf4llm emits Markdown into page text (bold/code/headers/list markers).
-# The LLM quotes that text verbatim, but page.search_for() queries the raw PDF
-# text layer, which has none of these markers -> no_match. Strip them so a quote
-# like "**Figure 3:** Velocity fields" matches "Figure 3: Velocity fields" in
-# the PDF. Only DOUBLE emphasis (**, __) and backticks are removed; single _ / *
-# are left intact to avoid corrupting snake_case identifiers common in papers.
-_MD_EMPHASIS_RE = re.compile(r"\*\*|__|`")
+# pymupdf4llm emits Markdown into page text (bold/italic/code/headers/list
+# markers). The LLM quotes that text verbatim, but page.search_for() queries the
+# raw PDF text layer, which has none of these markers -> no_match. Strip them so
+# "**Figure 3:**" / "_not generative_" match "Figure 3:" / "not generative" in
+# the PDF. We remove backticks and any run of * or _ acting as an emphasis
+# DELIMITER — i.e. NOT flanked by alphanumerics on both sides — so single-`_`
+# italics are stripped while snake_case identifiers (self_supervised, x_t) and
+# intra-word "a*b" stay intact.
+_MD_EMPHASIS_RE = re.compile(r"`+|(?<![0-9A-Za-z])[*_]+|[*_]+(?![0-9A-Za-z])")
 _MD_LEADING_MARKER_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)")
 
 
@@ -712,16 +714,24 @@ def _place_single_annotation(
     accepted_page: int | None = None
     accepted_quads: list = []
     used_fallback = False
-    # Phase 1: plain + re-ligated on each candidate page
+    # Phase 1: plain + re-ligated on each candidate page.
+    # NOTE: page.search_for(quads=True) returns ONE quad per wrapped line, so a
+    # single sentence spanning N lines yields N quads. Judge ambiguity by the
+    # TRUE occurrence count in the normalized word stream (which joins wrapped
+    # lines and de-hyphenates), NOT by the quad count — otherwise every
+    # multi-line quote is falsely rejected as ambiguous_multi_match.
     for pno in page_indices:
         page = doc[pno]
         cands = _gather_candidates(page, spec)
-        if len(cands) > 1:
+        if not cands:
+            continue
+        plain_quote = normalize_quote_for_pdf(spec.quote)
+        stream, _tbl = _build_word_index(page)
+        if stream and plain_quote and stream.count(plain_quote) > 1:
             return "ambiguous_multi_match"
-        if len(cands) == 1:
-            accepted_page = pno
-            accepted_quads = cands
-            break
+        accepted_page = pno
+        accepted_quads = cands
+        break
 
     # Phase 2: word-index fallback
     if accepted_page is None:
