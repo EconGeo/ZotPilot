@@ -1,10 +1,26 @@
 """Helpers for reconciling Chroma index state with the current Zotero PDF library."""
 
 import json
+import logging
 import os
 import tempfile
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Always-on safety floor: refuse orphan mass-deletion when the proposed deletion
+# exceeds this fraction of the current index. The empty-read and unreachable-dir
+# guards are unconditional and ignore this fraction entirely.
+MASS_DELETE_FRACTION_FLOOR = 0.25
+
+# Backstop for clearing a lease whose holder PID still appears alive (i.e. the
+# PID was reused by an unrelated process after the real holder died). Set well
+# beyond any realistic indexing run so a genuinely-running holder is never
+# stolen. PID-death is detected immediately and independently of this value.
+LEASE_STALE_SECONDS = 24 * 60 * 60  # 24 hours — longer than any realistic single
+# run (a large first index with vision can take many hours); only catches a stale
+# lease file left by a long-dead, PID-reused process.
 
 
 def current_library_pdf_doc_ids(zotero) -> set[str]:
@@ -58,11 +74,19 @@ class IndexJournal:
         return self._path
 
     def _load(self) -> None:
-        """Load journal from disk if a path is set and the file exists."""
+        """Load journal from disk if a path is set and the file exists.
+
+        A corrupt file must not brick indexing — log and start from empty so the
+        run can rewrite it (atomic _save makes future writes crash-safe).
+        """
         if self._path is None or not self._path.exists():
             return
-        with open(self._path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Ignoring corrupt index journal %s: %s", self._path, e)
+            return
         for doc_id, entry in data.items():
             if entry.get("state") == "committed":
                 self.committed[doc_id] = entry
@@ -120,11 +144,19 @@ class IndexLease:
         return self._path
 
     def _load(self) -> None:
-        """Load lease from disk if a path is set and the file exists."""
+        """Load lease from disk if a path is set and the file exists.
+
+        A corrupt lease file is treated as "no lease held" so a crash mid-write
+        cannot permanently block all indexing.
+        """
         if self._path is None or not self._path.exists():
             return
-        with open(self._path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Ignoring corrupt index lease %s: %s", self._path, e)
+            return
         self.holder_pid = data.get("holder_pid")
         self.acquired_at = data.get("acquired_at")
 
@@ -202,18 +234,45 @@ def record_table_failure(journal: IndexJournal, doc_id: str, reason: str) -> Non
         journal._save()
 
 
+def clear_table_failure(journal: IndexJournal, doc_id: str) -> None:
+    """Clear a previously recorded table/figure failure.
+
+    Called when a doc is reprocessed so a stale marker from an earlier run does
+    not linger forever (markers were previously add-only — a doc that failed once
+    and later reindexed cleanly kept the marker indefinitely). If this run fails
+    again, ``record_table_failure`` re-adds it.
+    """
+    had_marker = journal.table_failures.pop(doc_id, None) is not None
+    committed_entry = journal.committed.get(doc_id)
+    if committed_entry is not None and "table_failure" in committed_entry:
+        committed_entry.pop("table_failure", None)
+        had_marker = True
+    if had_marker:
+        journal._save()
+
+
 def acquire_lease(lease: IndexLease) -> str | None:
     """Attempt to acquire an indexing lease. Returns lease ID on success.
 
-    Stale leases (dead PID or older than 60 seconds) are cleared automatically.
+    Staleness is decided primarily by PROCESS LIVENESS, not wall-clock age. A
+    lease whose holder PID is still alive is treated as held for the entire run
+    — real indexing runs take many minutes (per-paper extraction plus vision
+    Batch waves of "10-30min" each, up to 3 waves), and stealing a live holder
+    mid-run lets two processes write the same Chroma collection concurrently and
+    corrupt it (the exact P0 data-loss class this lease exists to prevent).
+
+    The age check is only a backstop for a stale lease *file* left behind by a
+    long-dead process whose PID was later reused by an unrelated process (so
+    ``_is_pid_alive`` reports True forever). ``LEASE_STALE_SECONDS`` is therefore
+    set well beyond any realistic single run.
     """
     now = time.time()
     if lease.holder_pid is not None and lease.acquired_at is not None:
-        # Check if lease is stale
         pid_alive = _is_pid_alive(lease.holder_pid)
         age = now - lease.acquired_at
-        if not pid_alive or age > 60:
-            # Stale lease — clear it
+        if not pid_alive or age > LEASE_STALE_SECONDS:
+            # Holder crashed (dead PID) or the lease file is stale beyond the
+            # backstop (likely a reused PID) — safe to clear and take over.
             lease.holder_pid = None
             lease.acquired_at = None
             lease._save()
@@ -293,12 +352,98 @@ def orphaned_index_doc_ids(store, current_doc_ids: set[str]) -> set[str]:
     return set(store.get_indexed_doc_ids()) - current
 
 
-def reconcile_orphaned_index_docs(store, current_doc_ids: set[str]) -> dict:
-    """Delete orphaned indexed docs from Chroma and return a summary."""
-    orphaned = sorted(orphaned_index_doc_ids(store, current_doc_ids))
+def _mass_delete_refusal_reason(
+    *,
+    current_doc_ids: set[str],
+    library_unreachable: bool,
+    orphan_count: int,
+    index_size: int,
+    allow_mass_delete: bool,
+) -> str | None:
+    """Return a human-readable refusal reason if mass deletion must be blocked, else None.
+
+    Breach conditions (any one):
+      (a) the current-library read is empty (an unmounted drive or partial read is
+          indistinguishable from a truly empty library);
+      (b) the library/data directory is unreachable;
+      (c) the proposed deletion exceeds ``MASS_DELETE_FRACTION_FLOOR`` of the index.
+
+    ``allow_mass_delete`` bypasses ONLY (c); (a) and (b) are never legitimate signals
+    to wipe the index, so they refuse even under the override.
+    """
+    if library_unreachable:
+        return (
+            f"Zotero library/data directory is unreachable — refusing to delete "
+            f"{orphan_count} indexed document(s). Verify the data directory/drive is "
+            f"mounted, then re-run (override is intentionally disabled for unreachable reads)."
+        )
+    if len(current_doc_ids) == 0:
+        return (
+            f"current Zotero library read returned 0 items — refusing to delete "
+            f"{orphan_count} indexed document(s) (an unmounted drive or partial read looks "
+            f"identical to an empty library). Verify the library, then re-run (override is "
+            f"intentionally disabled for empty reads)."
+        )
+    if not allow_mass_delete and index_size > 0:
+        fraction = orphan_count / index_size
+        if fraction > MASS_DELETE_FRACTION_FLOOR:
+            return (
+                f"proposed deletion of {orphan_count}/{index_size} indexed document(s) "
+                f"({fraction:.0%}) exceeds the {MASS_DELETE_FRACTION_FLOOR:.0%} safety floor. "
+                f"If you really removed this many papers in Zotero, re-run with "
+                f"`zotpilot doctor reconcile --force` or `index_library(..., allow_mass_delete=True)`."
+            )
+    return None
+
+
+def reconcile_orphaned_index_docs(
+    store,
+    current_doc_ids: set[str],
+    *,
+    allow_mass_delete: bool = False,
+    library_unreachable: bool = False,
+) -> dict:
+    """Delete orphaned indexed docs from Chroma and return a summary.
+
+    An always-on safety floor refuses mass deletion when the current-library read
+    looks untrustworthy (empty read, unreachable data dir, or a deletion exceeding
+    ``MASS_DELETE_FRACTION_FLOOR`` of the index), so a transient signal can never
+    silently wipe the index.
+
+    Return contract: ``orphaned_doc_ids`` (the would-be orphans) and ``deleted_count``
+    are ALWAYS present with unchanged semantics. On refusal nothing is deleted,
+    ``deleted_count == 0``, and the summary ADDS ``refused_mass_delete: True`` plus
+    ``skipped_reason``; otherwise ``refused_mass_delete: False``.
+    """
+    indexed = set(store.get_indexed_doc_ids())
+    orphaned = sorted(indexed - set(current_doc_ids))
+
+    if orphaned:
+        reason = _mass_delete_refusal_reason(
+            current_doc_ids=current_doc_ids,
+            library_unreachable=library_unreachable,
+            orphan_count=len(orphaned),
+            index_size=len(indexed),
+            allow_mass_delete=allow_mass_delete,
+        )
+        if reason is not None:
+            db_path = getattr(store, "db_path", None)
+            logger.warning(
+                "Refusing orphan reconciliation: %s (index path: %s)",
+                reason,
+                db_path if db_path is not None else "<unknown>",
+            )
+            return {
+                "orphaned_doc_ids": orphaned,
+                "deleted_count": 0,
+                "refused_mass_delete": True,
+                "skipped_reason": reason,
+            }
+
     for doc_id in orphaned:
         store.delete_document(doc_id)
     return {
         "orphaned_doc_ids": orphaned,
         "deleted_count": len(orphaned),
+        "refused_mass_delete": False,
     }

@@ -306,6 +306,7 @@ class TestMCPInstructions:
 
         expected = {
             "advanced_search",
+            "annotate_pdf",
             "browse_library",
             "create_note",
             "get_annotations",
@@ -313,12 +314,14 @@ class TestMCPInstructions:
             "get_index_stats",
             "get_notes",
             "get_paper_details",
+            "get_paper_for_tutor",
             "get_passage_context",
             "index_library",
             "ingest_by_identifiers",
             "manage_collections",
             "manage_tags",
             "profile_library",
+            "save_reading_persona",
             "search_academic_databases",
             "search_boolean",
             "search_papers",

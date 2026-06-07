@@ -5,6 +5,7 @@ ML-based layout detection (tables, figures, headers, footers, OCR).
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from collections import defaultdict
@@ -72,6 +73,76 @@ def _should_run_full_document_ocr(
     low_text_overall = total_chars < min_chars_per_page * page_count
     mostly_near_empty = (near_empty_pages / page_count) >= near_empty_page_ratio_threshold
     return low_text_overall and mostly_near_empty
+
+
+# Fraction of the native text layer below which pymupdf4llm output is treated as
+# "under-extracted" (its over-eager internal OCR clobbered a good text layer).
+_NATIVE_FLOOR_FRACTION = 0.5
+_NATIVE_FLOOR_MIN_CHARS = 200  # only second-guess pymupdf4llm when native is substantial
+_NATIVE_FFFD_FRACTION = 0.005  # >0.5% replacement chars introduced by pymupdf4llm (not in native)
+_OCR_MIN_CHARS_PER_PAGE = 50  # below this per page, text is "near-empty" in absolute terms
+
+
+def _should_prefer_native(
+    md_chars: int, native_total: int, page_count: int, md_fffd: int = 0, native_fffd: int = 0
+) -> bool:
+    """True when the native text layer is clearly better than pymupdf4llm's output.
+
+    Two failure modes, both caused by pymupdf4llm's over-eager internal OCR:
+    (1) under-extraction — it clobbered a good text layer down to near-empty;
+    (2) introduced garble — it OCR'd some pages with the wrong language, adding
+        replacement chars (U+FFFD) that the clean native layer does not have.
+    Only fires when native is substantial, so genuinely-scanned PDFs (native
+    ~empty) are still left to the gated OCR fallback."""
+    if native_total <= _NATIVE_FLOOR_MIN_CHARS:
+        return False
+    # (1) Require BOTH a small fraction of native AND near-empty in absolute terms,
+    # so legitimately header/footer/reference-stripped markdown (which stays
+    # substantial) is NOT discarded — only an actual clobber-to-near-empty is.
+    near_empty_abs = md_chars < _OCR_MIN_CHARS_PER_PAGE * max(page_count, 1)
+    if md_chars < _NATIVE_FLOOR_FRACTION * native_total and near_empty_abs:
+        return True
+    # (2) introduced garble
+    if native_fffd == 0 and md_chars > 0 and (md_fffd / md_chars) > _NATIVE_FFFD_FRACTION:
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def _internal_ocr_disabled():
+    """Disable pymupdf4llm's internal per-page OCR for one to_markdown call.
+
+    pymupdf4llm OCRs pages its heuristic deems "photo-like", but on many PDFs
+    (especially CJK) those pages have a perfectly good text layer — the OCR is
+    slow, uses the wrong language, and its Tesseract calls can abort a long run.
+    We discard that OCR output anyway (see the native-floor below), so we make
+    the OCR a no-op here: get_textpage_ocr raises, pymupdf4llm yields empty for
+    that page, and the native-floor falls back to the clean native text. Docs
+    that never trigger OCR are unaffected. The real OCR path is restored on exit
+    so the gated OCR fallback (for genuinely-scanned PDFs) still works.
+    """
+    orig = pymupdf.Page.get_textpage_ocr
+
+    def _disabled(*_args, **_kwargs):
+        raise RuntimeError("zotpilot: pymupdf4llm internal OCR disabled")
+
+    pymupdf.Page.get_textpage_ocr = _disabled  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        pymupdf.Page.get_textpage_ocr = orig  # type: ignore[method-assign]
+
+
+def _native_page_chunks(native_texts: list[str]) -> list[dict]:
+    """Build page_chunks from plain native get_text — the reliable fallback when
+    pymupdf4llm crashes or under-extracts. Shape matches what the builder reads
+    (text + metadata.page_number + page_boxes); layout boxes are unavailable, so
+    table/figure layout counts degrade to 0 (figures are still extracted natively
+    below from page images/captions)."""
+    return [
+        {"text": t, "metadata": {"page_number": i + 1}, "page_boxes": []}
+        for i, t in enumerate(native_texts)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +319,18 @@ def _extract_figures_for_page(
     for fi, (fbbox, fcaption) in enumerate(figure_results):
         image_path = None
         if write_images and doc is not None and images_dir is not None:
-            img = render_figure(doc, page_num, fbbox, Path(images_dir), fi)
-            image_path = str(img) if img else None
+            try:
+                img = render_figure(doc, page_num, fbbox, Path(images_dir), fi)
+                image_path = str(img) if img else None
+            except Exception as e:
+                # A malformed embedded image (e.g. "Invalid bandwriter header")
+                # must not abort the whole document's extraction — skip just this
+                # figure's image and keep the text + other figures.
+                logger.warning(
+                    "Figure render failed on %s page %d fig %d: %s",
+                    getattr(doc, "name", "?"), page_num, fi, e,
+                )
+                image_path = None
         figures.append(ExtractedFigure(
             page_num=page_num,
             figure_index=fi,
@@ -285,25 +366,50 @@ def extract_document(
     _ = t0  # silence lint about access-only side effect
     import time
 
-    markdown_started = time.perf_counter()
-    page_chunks: list[dict] = pymupdf4llm.to_markdown(str(pdf_path), **kwargs)
-    markdown_elapsed = time.perf_counter() - markdown_started
-
-    # If too little text extracted, retry with PyMuPDF's built-in full-page OCR
-    # (pymupdf4llm's should_ocr_page() skips "photo-like" pages in scanned PDFs)
-    _OCR_MIN_CHARS_PER_PAGE = 50
-    total_chars = sum(len(chunk.get("text", "").strip()) for chunk in page_chunks)
-    native_text_lengths: list[int] = []
+    # Native per-page text is the reliable source of truth. pymupdf4llm runs an
+    # over-eager internal OCR on pages it deems "photo-like" (uncontrollable via
+    # args in this version); on some PDFs that OCR uses the wrong language and
+    # clobbers a perfectly good text layer with near-empty output, or crashes
+    # outright. We capture native text up front and use it as a floor / fallback.
     native_scan_started = time.perf_counter()
+    native_texts: list[str] = []
     try:
         native_doc = pymupdf.open(str(pdf_path))
-        for page in native_doc:
-            native_text_lengths.append(len(page.get_text().strip()))
+        native_texts = [page.get_text() for page in native_doc]
         native_doc.close()
     except Exception as e:
         logger.warning("Native text scan failed for %s: %s", pdf_path.name, e)
-        native_text_lengths = []
     native_scan_elapsed = time.perf_counter() - native_scan_started
+    native_text_lengths = [len(t.strip()) for t in native_texts]
+    native_total = sum(native_text_lengths)
+
+    markdown_started = time.perf_counter()
+    try:
+        with _internal_ocr_disabled():
+            page_chunks: list[dict] = pymupdf4llm.to_markdown(str(pdf_path), **kwargs)
+    except Exception as e:
+        logger.warning(
+            "pymupdf4llm.to_markdown failed for %s (%s); falling back to native text",
+            pdf_path.name, e,
+        )
+        page_chunks = _native_page_chunks(native_texts)
+    markdown_elapsed = time.perf_counter() - markdown_started
+
+    total_chars = sum(len(chunk.get("text", "").strip()) for chunk in page_chunks)
+
+    # pymupdf4llm's internal OCR can clobber a good native layer (near-empty) or
+    # inject replacement chars the clean native layer lacks — prefer native text
+    # in both cases. Only second-guesses it when native is substantial, so
+    # genuinely-scanned PDFs (native ~empty) still flow to the gated OCR fallback.
+    md_fffd = sum(chunk.get("text", "").count("�") for chunk in page_chunks)
+    native_fffd = sum(t.count("�") for t in native_texts)
+    if _should_prefer_native(total_chars, native_total, len(page_chunks), md_fffd, native_fffd):
+        logger.warning(
+            "pymupdf4llm output worse than native for %s (chars %d vs %d, fffd %d vs %d); using native",
+            pdf_path.name, total_chars, native_total, md_fffd, native_fffd,
+        )
+        page_chunks = _native_page_chunks(native_texts)
+        total_chars = sum(len(c.get("text", "").strip()) for c in page_chunks)
 
     near_empty_pages = sum(1 for n in native_text_lengths if n < 20)
     page_count = len(page_chunks)

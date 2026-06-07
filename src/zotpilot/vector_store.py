@@ -1,10 +1,8 @@
 """ChromaDB vector storage with chunk management."""
 import logging
 import re
-import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,44 +17,53 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Crash-isolated probe timeout (Decision (d)): the read-only probe runs in a
+# subprocess so a Rust-side segfault can't kill the caller; the timeout bounds a
+# hung open (e.g. lock contention) and classifies it as unavailable.
+_PROBE_TIMEOUT_SECONDS = 30
+
 
 def _probe_chroma_db_access(db_path: Path) -> bool:
-    """Probe whether an existing Chroma index can be opened safely.
+    """Probe whether an existing Chroma index can be opened safely (READ-only).
 
-    Run the probe in a subprocess so Rust-side segfaults do not take down the
-    caller. Returns False on any crash or non-zero exit.
+    Runs the probe in a subprocess so Rust-side segfaults do not take down the
+    caller (crash isolation, Decision (d)). The probe is READ-only and does NOT
+    load the HNSW index: it opens the client and does a ``get_collection`` (not
+    ``get_or_create``) without ``peek``/``count``.
+
+    Returns True when the directory is missing or empty (a fresh/first-run dir is
+    openable), and True when the index opens — including when the 'chunks'
+    collection does not exist yet. Returns False on any crash (negative
+    ``returncode``), non-zero exit, or timeout. Never raises; never moves or
+    mutates the directory.
     """
     if not db_path.exists():
         return True
     if not any(db_path.iterdir()):
         return True
 
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import chromadb; "
-                "from chromadb.config import Settings; "
-                f"c=chromadb.PersistentClient(path={str(db_path)!r}, settings=Settings(anonymized_telemetry=False)); "
-                "col=c.get_or_create_collection(name='chunks', metadata={'hnsw:space':'cosine'}); "
-                "col.peek(limit=1)"
-            ),
-        ],
-        capture_output=True,
-        text=True,
+    probe_script = (
+        "import chromadb\n"
+        "from chromadb.config import Settings\n"
+        f"client = chromadb.PersistentClient(path={str(db_path)!r}, "
+        "settings=Settings(anonymized_telemetry=False))\n"
+        "try:\n"
+        "    client.get_collection('chunks')\n"
+        "except (ValueError, chromadb.errors.NotFoundError):\n"
+        "    pass\n"
     )
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    # returncode == 0 -> openable; non-zero (real open error) or negative
+    # (SIGSEGV child) -> unavailable. The READ/open path NEVER moves or recreates the dir.
     return probe.returncode == 0
-
-
-def _quarantine_chroma_db(db_path: Path) -> Path | None:
-    """Move a broken Chroma directory aside and return the backup path."""
-    if not db_path.exists():
-        return None
-    suffix = time.strftime("%Y%m%d-%H%M%S")
-    backup = db_path.with_name(f"{db_path.name}.corrupt-{suffix}")
-    shutil.move(str(db_path), str(backup))
-    return backup
 
 
 def _ref_chunk_index(ref_map: dict, element_type: str, item) -> int:
@@ -73,6 +80,15 @@ class EmbeddingDimensionMismatchError(Exception):
     """Raised when embedder dimensions don't match existing index."""
 
 
+class IndexUnavailableError(Exception):
+    """Raised when an existing vector index cannot be opened safely.
+
+    The READ/open path raises this INSTEAD of destroying data: the index bytes
+    are left 100% intact. The message is intentionally actionable and avoids
+    implying user corruption.
+    """
+
+
 class VectorStore:
     """
     ChromaDB-backed vector store for document chunks.
@@ -87,11 +103,17 @@ class VectorStore:
     def __init__(self, db_path: Path, embedder: EmbedderProtocol):
         self.db_path = Path(db_path)
         if not _probe_chroma_db_access(self.db_path):
-            backup = _quarantine_chroma_db(self.db_path)
-            logger.warning(
-                "Chroma index at %s could not be opened safely; moved aside to %s and rebuilding a fresh index.",
-                self.db_path,
-                backup,
+            # READ/open path (B1 refuse-and-alert): NEVER move/delete/recreate.
+            # Leave the bytes 100% intact and raise an actionable error.
+            raise IndexUnavailableError(
+                f"The vector index at {self.db_path} could not be opened safely. "
+                f"Your index files were left untouched.\n"
+                f"This is often TRANSIENT (another process is using the index, or disk "
+                f"contention) — wait a moment and retry.\n"
+                f"If it persists, the index may be unreadable — most commonly because it "
+                f"was built by a different chromadb version, NOT because your data is "
+                f"corrupt. Run 'zotpilot doctor --recover-index' to rebuild it from the "
+                f"intact data."
             )
         self.db_path.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +181,22 @@ class VectorStore:
             "quality_grade": doc_meta.get("quality_grade", ""),
         }
 
+    def _guarded_add(self, ids: list, documents: list, embeddings: list, metadatas: list) -> None:
+        """Add to the collection only when ids/documents/embeddings/metadatas are
+        perfectly aligned. A provider that drops or duplicates a vector (some
+        OpenAI-compatible/DashScope fallbacks can return a different count) would
+        otherwise misalign text↔vector silently — chunk N served with chunk M's
+        embedding. Fail loudly so the journal's in-progress recovery re-runs the doc.
+        """
+        n = len(ids)
+        if not (len(documents) == n and len(embeddings) == n and len(metadatas) == n):
+            raise ValueError(
+                "Refusing to store misaligned vectors: "
+                f"ids={n}, documents={len(documents)}, embeddings={len(embeddings)}, "
+                f"metadatas={len(metadatas)} (embedding provider returned a wrong count)"
+            )
+        self.collection.add(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+
     def add_chunks(self, doc_id: str, doc_meta: dict, chunks: list[Chunk]) -> None:
         """
         Add all chunks for a document.
@@ -192,12 +230,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._guarded_add(ids, texts, embeddings, metadatas)
 
     def add_tables(
         self,
@@ -246,12 +279,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._guarded_add(ids, texts, embeddings, metadatas)
 
     def add_figures(
         self,
@@ -302,12 +330,7 @@ class VectorStore:
 
         if ids:
             embeddings = self.embedder.embed(documents, task_type="RETRIEVAL_DOCUMENT")
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
+            self._guarded_add(ids, documents, embeddings, metadatas)
 
     def _cached_embed_query(self, query: str) -> list[float]:
         """Embed a query, returning cached result if available."""
@@ -457,6 +480,25 @@ class VectorStore:
             for chunk_id in results["ids"]
             if self._doc_id_from_chunk_id(chunk_id) in doc_ids
         )
+
+    def count_chunk_types(self, doc_ids: set[str]) -> dict[str, int]:
+        """Exact text/table/figure chunk counts for the given docs, derived from
+        chunk-ID prefixes. Unlike the metadata sample in get_index_stats this is
+        not capped, so it reports the true distribution for large indexes."""
+        counts = {"text": 0, "table": 0, "figure": 0}
+        if not doc_ids:
+            return counts
+        results = self.collection.get(include=[])  # IDs only
+        for chunk_id in results.get("ids") or []:
+            if self._doc_id_from_chunk_id(chunk_id) not in doc_ids:
+                continue
+            if "_chunk_" in chunk_id:
+                counts["text"] += 1
+            elif "_table_" in chunk_id:
+                counts["table"] += 1
+            elif "_fig_" in chunk_id:
+                counts["figure"] += 1
+        return counts
 
     def get_document_meta(self, doc_id: str) -> dict | None:
         """Get metadata for a document's first chunk.

@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from zotpilot.vector_store import VectorStore
+from zotpilot.vector_store import (
+    IndexUnavailableError,
+    VectorStore,
+    _probe_chroma_db_access,
+)
 
 
 @pytest.fixture
@@ -72,16 +76,58 @@ class TestVectorStore:
         results = store.search("anything", top_k=5)
         assert results == []
 
-    def test_corrupt_db_is_quarantined_when_probe_fails(self, tmp_path, mock_embedder):
+    def test_probe_fail_on_read_path_raises_and_keeps_bytes(self, tmp_path, mock_embedder):
+        """AC1: a probe/open failure on the READ path never moves/recreates the DB.
+
+        It raises IndexUnavailableError and leaves the bytes 100% intact (nothing
+        moved aside, no `chroma.corrupt-*` backup created).
+        """
         db_path = tmp_path / "chroma"
         db_path.mkdir()
         (db_path / "chroma.sqlite3").write_text("broken")
+        original_bytes = (db_path / "chroma.sqlite3").read_text()
 
-        with (
-            patch("zotpilot.vector_store._probe_chroma_db_access", return_value=False),
-        ):
-            store = VectorStore(db_path, mock_embedder)
+        with patch("zotpilot.vector_store._probe_chroma_db_access", return_value=False):
+            with pytest.raises(IndexUnavailableError):
+                VectorStore(db_path, mock_embedder)
 
-        backups = list(tmp_path.glob("chroma.corrupt-*"))
-        assert len(backups) == 1
-        assert store.db_path.exists()
+        # Bytes intact, nothing moved, no quarantine backup created.
+        assert db_path.exists()
+        assert (db_path / "chroma.sqlite3").read_text() == original_bytes
+        assert list(tmp_path.glob("chroma.corrupt-*")) == []
+
+
+class TestProbeChromaDbAccess:
+    def test_missing_dir_is_openable(self, tmp_path):
+        assert _probe_chroma_db_access(tmp_path / "does-not-exist") is True
+
+    def test_empty_dir_is_openable(self, tmp_path):
+        empty = tmp_path / "chroma"
+        empty.mkdir()
+        assert _probe_chroma_db_access(empty) is True
+
+    def test_healthy_populated_dir_is_openable(self, populated_store):
+        assert _probe_chroma_db_access(populated_store.db_path) is True
+
+    def test_unreadable_dir_is_unavailable_without_raising(self, tmp_path):
+        db_path = tmp_path / "chroma"
+        db_path.mkdir()
+        # Non-empty but not a valid Chroma store -> subprocess open fails (non-zero
+        # exit). Must return False without raising on the READ path.
+        (db_path / "chroma.sqlite3").write_text("not a real sqlite database")
+        assert _probe_chroma_db_access(db_path) is False
+
+
+class TestGuardedAdd:
+    """A provider returning the wrong vector count must fail loudly, not silently
+    misalign text↔embedding (chunk N served with chunk M's vector)."""
+
+    def test_misaligned_lengths_raise(self, store):
+        with pytest.raises(ValueError, match="misaligned"):
+            store._guarded_add(["a", "b"], ["t1", "t2"], [[0.1]], [{}, {}])  # 1 embedding, 2 ids
+
+    def test_aligned_calls_collection_add(self, store):
+        from unittest.mock import MagicMock
+        store.collection = MagicMock()
+        store._guarded_add(["a"], ["t1"], [[0.1, 0.2]], [{"doc_id": "X"}])
+        store.collection.add.assert_called_once()

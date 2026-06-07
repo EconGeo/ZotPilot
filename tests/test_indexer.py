@@ -345,17 +345,19 @@ class TestSkipTracking:
         assert result["indexed"] == 1
         indexer.store.delete_document.assert_called_once_with("K2")
 
-    def test_doc_deleted_during_run_is_removed_by_final_reconciliation(self):
+    def test_doc_deleted_during_run_is_removed_by_final_reconciliation(self, tmp_path):
         from unittest.mock import MagicMock, patch
 
-        item = self._make_item("K1", "Paper A", has_pdf=True)
-        indexer = self._make_indexer([item])
+        items = [self._make_item(f"K{i}", f"Paper {i}", has_pdf=True) for i in range(1, 6)]
+        indexer = self._make_indexer(items)
         self._patch_indexer(indexer)
+        # Reachable library so the RC6 floor does not refuse the legit deletion.
+        indexer.config.zotero_data_dir = tmp_path
 
-        # First library snapshot (start of run): item still present.
-        # Second snapshot (end of run): item has disappeared from the library.
-        indexer.zotero.get_all_items_with_pdfs.side_effect = [[item], []]
-        indexer.store.get_indexed_doc_ids.return_value = {"K1"}
+        # First snapshot (start of run): all five present.
+        # Second snapshot (end of run): K1 has disappeared (1/5 = 20%, below floor).
+        indexer.zotero.get_all_items_with_pdfs.side_effect = [list(items), items[1:]]
+        indexer.store.get_indexed_doc_ids.return_value = {"K1", "K2", "K3", "K4", "K5"}
         indexer.store.get_document_meta.return_value = None
         indexer.store.delete_document = MagicMock()
 
@@ -369,10 +371,72 @@ class TestSkipTracking:
              patch.object(indexer, "_index_extraction", return_value=(1, 0, "", {}, "A")):
             result = indexer.index_all(batch_size=None)
 
-        assert result["indexed"] == 1
-        # The document was indexed during this run, then removed when the
-        # refreshed library snapshot no longer contained it.
+        assert result["indexed"] == 5
+        # The document removed mid-run is reconciled at end (sub-floor deletion).
         indexer.store.delete_document.assert_called_once_with("K1")
+
+    def test_final_reconciliation_refusal_is_surfaced_not_silent(self, tmp_path, caplog):
+        """AC9: an empty end-of-run read must surface a refusal, never delete, and
+        never log the misleading "removed 0 orphans" line."""
+        import logging
+        from unittest.mock import MagicMock, patch
+
+        item = self._make_item("K1", "Paper A", has_pdf=True)
+        indexer = self._make_indexer([item])
+        self._patch_indexer(indexer)
+        indexer.config.zotero_data_dir = tmp_path
+
+        # Start snapshot has K1; end snapshot reads empty (e.g. drive unmounted).
+        indexer.zotero.get_all_items_with_pdfs.side_effect = [[item], []]
+        indexer.store.get_indexed_doc_ids.return_value = {"K1"}
+        indexer.store.get_document_meta.return_value = None
+        indexer.store.delete_document = MagicMock()
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "A"
+        mock_extraction.pending_vision = None
+
+        with caplog.at_level(logging.WARNING, logger="zotpilot.indexer"), \
+             patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", return_value=(1, 0, "", {}, "A")):
+            indexer.index_all(batch_size=None)
+
+        # Nothing deleted, refusal surfaced as a WARNING, no misleading info line.
+        indexer.store.delete_document.assert_not_called()
+        assert any(
+            "refused end-of-run orphan reconciliation" in r.message for r in caplog.records
+        )
+        assert not any("removed 0 orphaned" in r.getMessage() for r in caplog.records)
+
+    def test_config_drift_without_force_blocks(self, tmp_path):
+        """AC6 / RC8: a config-hash mismatch without force must BLOCK with a clear
+        error, not silently proceed into a mixed embedding-space index."""
+        from unittest.mock import MagicMock, patch
+
+        import pytest
+
+        from zotpilot.indexer import ConfigDriftError
+
+        item = self._make_item("K1", "Paper A", has_pdf=True)
+        indexer = self._make_indexer([item])
+        self._patch_indexer(indexer)
+        indexer.config.zotero_data_dir = tmp_path
+        indexer.store.get_indexed_doc_ids.return_value = {"K1"}
+
+        # A persisted hash that cannot match the current config hash.
+        indexer._config_hash_path.exists.return_value = True
+        indexer._config_hash_path.read_text.return_value = "stale-hash-does-not-match"
+
+        with patch("zotpilot.indexer.extract_document") as mock_extract, \
+             patch.object(indexer, "_index_extraction") as mock_index_extraction, \
+             pytest.raises(ConfigDriftError, match="--force"):
+            indexer.index_all(batch_size=None)
+
+        # Blocked before any extraction/indexing work.
+        mock_extract.assert_not_called()
+        mock_index_extraction.assert_not_called()
 
 
 class TestVisionBudgetGuards:
@@ -404,7 +468,11 @@ class TestVisionBudgetGuards:
              patch.object(dashscope_vision_api, "DashScopeVisionAPI") as vision_cls:
             Indexer(config)
 
-        vision_cls.assert_called_once_with(api_key="dashscope-key", model="qwen3-vl-flash")
+        vision_cls.assert_called_once()
+        _args, kwargs = vision_cls.call_args
+        assert kwargs["api_key"] == "dashscope-key"
+        assert kwargs["model"] == "qwen3-vl-flash"
+        assert "result_cache" in kwargs  # vision-results cache wired in
 
     def test_skips_batch_vision_when_table_cap_is_exceeded(self):
         from zotpilot.indexer import Indexer
@@ -452,6 +520,7 @@ class TestVisionBudgetGuards:
         indexer._index_extraction = MagicMock(return_value=(1, 0, "", {}, "A"))
         indexer._pdf_hash = MagicMock(return_value="abc")
         indexer._config_hash_path = MagicMock()
+        indexer._config_hash_path.exists.return_value = False
         indexer._save_empty_docs = MagicMock()
 
         with patch("zotpilot.indexer.extract_document", return_value=extraction), \
