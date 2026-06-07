@@ -1,4 +1,8 @@
-from zotpilot.pdf.extractor import _should_run_full_document_ocr
+from zotpilot.pdf.extractor import (
+    _native_page_chunks,
+    _should_prefer_native,
+    _should_run_full_document_ocr,
+)
 
 
 def test_ocr_policy_skips_text_rich_documents():
@@ -25,7 +29,6 @@ def test_ocr_policy_skips_mixed_documents_with_enough_native_text():
     ) is False
 
 
-from zotpilot.pdf.extractor import _native_page_chunks, _should_prefer_native
 
 
 class TestNativeFloor:
@@ -54,3 +57,20 @@ class TestNativeFloor:
         assert chunks[0]["metadata"]["page_number"] == 1
         assert chunks[1]["metadata"]["page_number"] == 2
         assert chunks[0]["page_boxes"] == []
+
+
+class TestNativeFloorGarble:
+    """pymupdf4llm's partial internal OCR can inject U+FFFD into an otherwise good
+    doc; prefer the clean native layer when it does."""
+
+    def test_prefers_native_when_md_injects_garble(self):
+        # native clean (0 fffd), md introduced 278 fffd over 11001 chars (2.5%)
+        assert _should_prefer_native(md_chars=11001, native_total=10177, md_fffd=278, native_fffd=0) is True
+
+    def test_keeps_markdown_when_few_stray_fffd(self):
+        # a couple stray replacement chars (<0.5%) is not worth losing structure
+        assert _should_prefer_native(md_chars=11000, native_total=10000, md_fffd=5, native_fffd=0) is False
+
+    def test_keeps_markdown_when_native_also_garbled(self):
+        # native layer itself has replacement chars (genuine bad font) -> no gain
+        assert _should_prefer_native(md_chars=11000, native_total=10000, md_fffd=300, native_fffd=250) is False
