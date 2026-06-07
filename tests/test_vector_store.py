@@ -116,3 +116,18 @@ class TestProbeChromaDbAccess:
         # exit). Must return False without raising on the READ path.
         (db_path / "chroma.sqlite3").write_text("not a real sqlite database")
         assert _probe_chroma_db_access(db_path) is False
+
+
+class TestGuardedAdd:
+    """A provider returning the wrong vector count must fail loudly, not silently
+    misalign text↔embedding (chunk N served with chunk M's vector)."""
+
+    def test_misaligned_lengths_raise(self, store):
+        with pytest.raises(ValueError, match="misaligned"):
+            store._guarded_add(["a", "b"], ["t1", "t2"], [[0.1]], [{}, {}])  # 1 embedding, 2 ids
+
+    def test_aligned_calls_collection_add(self, store):
+        from unittest.mock import MagicMock
+        store.collection = MagicMock()
+        store._guarded_add(["a"], ["t1"], [[0.1, 0.2]], [{"doc_id": "X"}])
+        store.collection.add.assert_called_once()

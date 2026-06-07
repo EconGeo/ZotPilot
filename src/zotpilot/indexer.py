@@ -2,7 +2,9 @@
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +16,7 @@ from .embeddings import create_embedder
 from .embeddings.base import RateLimitError
 from .index_authority import (
     IndexJournal,
+    clear_table_failure,
     mark_committed,
     mark_in_progress,
     reconcile_orphaned_index_docs,
@@ -33,6 +36,14 @@ _VISION_ESTIMATED_COST_PER_TABLE_USD = 0.01
 # Generic provider-agnostic backstop: abort after this many consecutive
 # same-signature doc failures even when no RateLimitError was classified.
 CONSECUTIVE_FAILURE_ABORT_THRESHOLD = 3
+
+# Rate-limit retry: on a typed RateLimitError, wait the provider-supplied
+# retry_after (capped) and retry the SAME paper up to N times before letting the
+# error propagate to the Phase-3 fail-fast abort. This consumes the retry_after
+# that the embedding layer already parses (previously parsed but discarded).
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_DEFAULT_WAIT_SECONDS = 30.0  # used when a 429 carries no retry_after
+RATE_LIMIT_MAX_WAIT_SECONDS = 120.0  # per-attempt cap so a bogus retry_after can't hang the run
 
 
 def _failure_signature(e: Exception) -> str:
@@ -91,6 +102,9 @@ class Indexer:
         self.embedder = create_embedder(config)
         self.store = VectorStore(config.chroma_db_path, self.embedder)
         self.journal_ranker = JournalRanker()
+        # Injectable so tests can neutralize the wait; production uses time.sleep.
+        self._sleep = time.sleep
+        self._rate_limit_max_retries = RATE_LIMIT_MAX_RETRIES
         self._empty_docs_path = config.chroma_db_path / "empty_docs.json"
         self._config_hash_path = config.chroma_db_path / "config_hash.txt"
         self.journal: IndexJournal | None = None
@@ -100,17 +114,24 @@ class Indexer:
 
         if config.vision_enabled and vision_provider == "dashscope" and config.dashscope_api_key:
             from .feature_extraction.dashscope_vision_api import DashScopeVisionAPI
+            from .feature_extraction.vision_cache import VisionResultCache
             self._vision_api = DashScopeVisionAPI(
                 api_key=config.dashscope_api_key,
                 model=config.vision_model,
+                result_cache=VisionResultCache(config.chroma_db_path.parent / "vision_cache"),
             )
         elif config.vision_enabled and config.anthropic_api_key:
             from .feature_extraction.vision_api import VisionAPI
+            from .feature_extraction.vision_cache import VisionResultCache
             cost_log_path = config.chroma_db_path.parent / "vision_costs.json"
             self._vision_api = VisionAPI(
                 api_key=config.anthropic_api_key,
                 model=config.vision_model,
                 cost_log_path=cost_log_path,
+                # Cache parsed results so a re-run (e.g. resuming after a
+                # rate-limit abort) does not re-pay the vision API for tables
+                # already transcribed from unchanged PDFs.
+                result_cache=VisionResultCache(config.chroma_db_path.parent / "vision_cache"),
             )
         else:
             self._vision_api = None
@@ -120,13 +141,35 @@ class Indexer:
     # ------------------------------------------------------------------
 
     def _load_empty_docs(self) -> dict[str, str]:
-        """Load {item_key: pdf_hash} for docs that yielded no chunks."""
-        if self._empty_docs_path.exists():
+        """Load {item_key: pdf_hash} for docs that yielded no chunks.
+
+        A corrupt file (e.g. truncated by a crash mid-write) must not brick the
+        whole indexing run — treat it as empty and let the run rewrite it.
+        """
+        if not self._empty_docs_path.exists():
+            return {}
+        try:
             return json.loads(self._empty_docs_path.read_text())
-        return {}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Ignoring corrupt empty_docs file %s: %s", self._empty_docs_path, e)
+            return {}
 
     def _save_empty_docs(self, mapping: dict[str, str]) -> None:
-        self._empty_docs_path.write_text(json.dumps(mapping, indent=2))
+        """Persist atomically (tempfile + os.replace) so a crash mid-write
+        cannot leave a half-written file that fails to parse next run."""
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self._empty_docs_path.parent, suffix=".tmp", prefix="zotpilot_empty_docs_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(mapping, f, indent=2)
+            os.replace(tmp_path, self._empty_docs_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _estimate_vision_cost_usd(self, pending_tables: int) -> float:
         """Return a rough upper-bound estimate for batch vision cost."""
@@ -554,8 +597,8 @@ class Indexer:
         for idx, (item_key, (item, extraction)) in enumerate(extraction_items, 1):
             t0 = time.perf_counter()
             try:
-                n_chunks, n_tables, reason, extraction_stats, quality_grade = self._index_extraction(
-                    item, extraction, self.journal
+                n_chunks, n_tables, reason, extraction_stats, quality_grade = self._index_extraction_with_retry(
+                    item, extraction
                 )
 
                 # Aggregate extraction stats
@@ -684,26 +727,32 @@ class Indexer:
         # progress. Reconcile once more at the end so a document that was still
         # visible at startup but moved to trash during this run is removed from
         # Chroma immediately, without requiring a second index_library call.
-        final_current_doc_ids = {
-            item.item_key
-            for item in self.zotero.get_all_items_with_pdfs()
-            if item.pdf_path and item.pdf_path.exists()
-        }
-        final_reconciliation = reconcile_orphaned_index_docs(
-            self.store,
-            final_current_doc_ids,
-            library_unreachable=self._library_unreachable(),
-        )
-        if final_reconciliation.get("refused_mass_delete"):
-            logger.warning(
-                "Indexer: refused end-of-run orphan reconciliation — %s",
-                final_reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+        # Skip when nothing was indexed this call: the startup reconciliation
+        # (above) already reflects current state, and a second full library scan
+        # per no-op/small batch call is pure overhead (the default batch_size
+        # makes many such calls). A run that committed nothing spanned no
+        # meaningful window for new deletions.
+        if counts["indexed"] > 0:
+            final_current_doc_ids = {
+                item.item_key
+                for item in self.zotero.get_all_items_with_pdfs()
+                if item.pdf_path and item.pdf_path.exists()
+            }
+            final_reconciliation = reconcile_orphaned_index_docs(
+                self.store,
+                final_current_doc_ids,
+                library_unreachable=self._library_unreachable(),
             )
-        elif final_reconciliation["deleted_count"] > 0:
-            logger.info(
-                "Indexer: removed %d orphaned indexed document(s) after refresh of Zotero library state",
-                final_reconciliation["deleted_count"],
-            )
+            if final_reconciliation.get("refused_mass_delete"):
+                logger.warning(
+                    "Indexer: refused end-of-run orphan reconciliation — %s",
+                    final_reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+                )
+            elif final_reconciliation["deleted_count"] > 0:
+                logger.info(
+                    "Indexer: removed %d orphaned indexed document(s) after refresh of Zotero library state",
+                    final_reconciliation["deleted_count"],
+                )
 
         return {"results": results, **counts}
 
@@ -745,6 +794,33 @@ class Indexer:
                 resolve_pending_vision({item.item_key: extraction}, self._vision_api)
 
         return self._index_extraction(item, extraction, self.journal)
+
+    def _index_extraction_with_retry(self, item: ZoteroItem, extraction) -> tuple[int, int, str, dict, str]:
+        """Wrap ``_index_extraction`` with bounded rate-limit retries.
+
+        On a typed ``RateLimitError`` we wait the provider-supplied ``retry_after``
+        (falling back to ``RATE_LIMIT_DEFAULT_WAIT_SECONDS``, capped at
+        ``RATE_LIMIT_MAX_WAIT_SECONDS``) and retry the same paper up to
+        ``self._rate_limit_max_retries`` times. Once retries are exhausted the
+        last ``RateLimitError`` propagates unchanged, so the Phase-3 loop still
+        fails fast exactly as before — retry is a recovery layer in front of that
+        abort, not a replacement for it.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._index_extraction(item, extraction, self.journal)
+            except RateLimitError as e:
+                if attempt >= self._rate_limit_max_retries:
+                    raise
+                attempt += 1
+                wait = e.retry_after if e.retry_after is not None else RATE_LIMIT_DEFAULT_WAIT_SECONDS
+                wait = min(max(wait, 0.0), RATE_LIMIT_MAX_WAIT_SECONDS)
+                logger.warning(
+                    f"Rate limit on {item.item_key} (attempt {attempt}/{self._rate_limit_max_retries}); "
+                    f"waiting {wait:.0f}s before retry"
+                )
+                self._sleep(wait)
 
     def _index_extraction(
         self,
@@ -814,7 +890,10 @@ class Indexer:
         self.store.add_chunks(item.item_key, doc_meta, chunks)
         store_elapsed = time.perf_counter() - store_started
 
-        # Mark committed after text-chunk persistence
+        # Mark committed after text-chunk persistence. NOTE: a stale
+        # table/figure-failure marker is intentionally NOT cleared here — it is
+        # cleared only after tables+figures actually store below, so a failure
+        # (incl. a re-raised RateLimitError) leaves the prior marker intact.
         if journal is not None:
             mark_committed(journal, item_key)
         logger.info(
@@ -850,6 +929,10 @@ class Indexer:
                     ctx = get_reference_context(extraction.full_markdown, chunks, ref_map, "figure", int(m.group(1)))
                     fig.reference_context = ctx
 
+        # Tracks a swallowed (non-quota) table/figure failure recorded THIS run,
+        # so we don't clear the marker we just wrote at the end.
+        recorded_failure_this_run = False
+
         # Store tables if enabled (skip layout artifacts)
         n_tables = 0
         real_tables = [t for t in extraction.tables if not t.artifact_type]
@@ -864,6 +947,7 @@ class Indexer:
                 logger.warning(f"Table storage failed for {item_key}: {e}")
                 if journal is not None:
                     record_table_failure(journal, item_key, f"table storage: {e}")
+                    recorded_failure_this_run = True
         if n_artifacts:
             logger.debug(f"  Skipped {n_artifacts} artifact table(s)")
         logger.debug(f"  Extracted {n_tables} tables")
@@ -881,6 +965,14 @@ class Indexer:
                 logger.warning(f"Figure storage failed for {item_key}: {e}")
                 if journal is not None:
                     record_table_failure(journal, item_key, f"figure storage: {e}")
+                    recorded_failure_this_run = True
+
+        # Tables and figures stored cleanly this run: clear any stale marker from a
+        # prior run. Skipped when this run recorded its own failure (keep that),
+        # and a re-raised RateLimitError above never reaches here, so a
+        # quota-aborted run keeps the doc's prior marker intact.
+        if journal is not None and not recorded_failure_this_run:
+            clear_table_failure(journal, item_key)
 
         logger.debug(f"Indexed {item.item_key}: {len(chunks)} chunks, {n_tables} tables, {n_figures} figures, quality {quality_grade}")  # noqa: E501
         return len(chunks), n_tables, "", extraction.stats, quality_grade

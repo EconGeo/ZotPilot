@@ -413,16 +413,32 @@ class TestStaleLeaseRecovery:
         acquire_lease(lease)  # should clear stale and succeed
         assert lease.holder_pid == os.getpid()
 
-    def test_stale_timestamp_cleared(self):
+    def test_live_holder_not_stolen_mid_run(self):
+        """A lease held by a LIVE pid must NOT be stolen just because it is older
+        than a couple of minutes — real runs span many minutes (vision waves are
+        10-30min). Stealing a live holder is the concurrent-write corruption bug."""
         _requires_journal()
-        from zotpilot.index_authority import IndexLease, acquire_lease
+        from zotpilot.index_authority import IndexLease, LeaseContentionError, acquire_lease
+
+        lease = IndexLease()
+        lease.holder_pid = os.getpid()  # alive
+        lease.acquired_at = time.time() - 600  # 10 minutes into a real run
+        with pytest.raises(LeaseContentionError):
+            acquire_lease(lease)
+
+    def test_live_pid_cleared_past_backstop(self):
+        """Backstop: a lease whose timestamp predates LEASE_STALE_SECONDS is
+        cleared even if the PID looks alive (assumed reused after the real
+        holder died)."""
+        _requires_journal()
+        from zotpilot.index_authority import LEASE_STALE_SECONDS, IndexLease, acquire_lease
 
         lease = IndexLease()
         lease.holder_pid = os.getpid()
-        lease.acquired_at = time.time() - 120  # 2 minutes ago
-        acquire_lease(lease)  # should clear stale and succeed
+        lease.acquired_at = time.time() - (LEASE_STALE_SECONDS + 1)
+        acquire_lease(lease)  # backstop clears it and we take over
         assert lease.holder_pid == os.getpid()
-        assert time.time() - lease.acquired_at < 60
+        assert time.time() - lease.acquired_at < 5
 
     def test_fresh_lease_not_cleared(self):
         _requires_journal()
@@ -477,3 +493,63 @@ class TestTableFailureAfterCommit:
         mark_committed(journal, "DOC1")
         record_table_failure(journal, "DOC1", "vision error")
         assert "DOC1" in journal.table_failures
+
+
+class TestCorruptStateFilesAreTolerated:
+    """A truncated/garbage state file (e.g. crash mid-write) must not brick
+    indexing — loaders log and start empty; saves are atomic."""
+
+    def test_corrupt_journal_loads_empty(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal
+        p = tmp_path / "index_journal.json"
+        p.write_text("{ this is not valid json", encoding="utf-8")
+        journal = IndexJournal(p)  # must not raise
+        assert journal.committed == {}
+        assert journal.in_progress == {}
+
+    def test_corrupt_lease_loads_unheld(self, tmp_path):
+        from zotpilot.index_authority import IndexLease
+        p = tmp_path / "index_lease.json"
+        p.write_text("\x00\x00 truncated", encoding="utf-8")
+        lease = IndexLease(p)  # must not raise
+        assert lease.holder_pid is None
+        assert lease.acquired_at is None
+
+    def test_journal_save_is_atomic_roundtrip(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal, mark_committed
+        p = tmp_path / "index_journal.json"
+        journal = IndexJournal(p)
+        mark_committed(journal, "DOC1")
+        reloaded = IndexJournal(p)
+        assert "DOC1" in reloaded.committed
+        # no stray temp files left behind
+        assert not list(tmp_path.glob("*.tmp"))
+
+
+class TestClearTableFailure:
+    def test_clear_removes_marker_and_persists(self, tmp_path):
+        from zotpilot.index_authority import (
+            IndexJournal,
+            clear_table_failure,
+            mark_committed,
+            record_table_failure,
+        )
+        p = tmp_path / "index_journal.json"
+        journal = IndexJournal(p)
+        mark_committed(journal, "DOC1")
+        record_table_failure(journal, "DOC1", "table storage: boom")
+        assert "DOC1" in journal.table_failures
+        assert IndexJournal(p).table_failures.get("DOC1")  # persisted
+
+        clear_table_failure(journal, "DOC1")
+        assert "DOC1" not in journal.table_failures
+        # cleared on disk and not re-attached to the committed entry on reload
+        reloaded = IndexJournal(p)
+        assert "DOC1" not in reloaded.table_failures
+        assert "table_failure" not in reloaded.committed.get("DOC1", {})
+
+    def test_clear_is_noop_when_no_marker(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal, clear_table_failure
+        journal = IndexJournal(tmp_path / "index_journal.json")
+        clear_table_failure(journal, "NOPE")  # must not raise
+        assert journal.table_failures == {}

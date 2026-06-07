@@ -365,6 +365,7 @@ class TestContextAndIndexingContracts:
         store = MagicMock()
         store.get_indexed_doc_ids.return_value = {"KEY0"}
         store.count_chunks_for_doc_ids.return_value = 120
+        store.count_chunk_types.return_value = {"text": 100, "table": 5, "figure": 15}
         store.collection.get.return_value = {"metadatas": []}
         zotero = MagicMock()
         zotero.get_all_items_with_pdfs.return_value = [_make_item(i) for i in range(200)]

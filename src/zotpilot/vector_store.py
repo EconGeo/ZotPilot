@@ -181,6 +181,22 @@ class VectorStore:
             "quality_grade": doc_meta.get("quality_grade", ""),
         }
 
+    def _guarded_add(self, ids: list, documents: list, embeddings: list, metadatas: list) -> None:
+        """Add to the collection only when ids/documents/embeddings/metadatas are
+        perfectly aligned. A provider that drops or duplicates a vector (some
+        OpenAI-compatible/DashScope fallbacks can return a different count) would
+        otherwise misalign text↔vector silently — chunk N served with chunk M's
+        embedding. Fail loudly so the journal's in-progress recovery re-runs the doc.
+        """
+        n = len(ids)
+        if not (len(documents) == n and len(embeddings) == n and len(metadatas) == n):
+            raise ValueError(
+                "Refusing to store misaligned vectors: "
+                f"ids={n}, documents={len(documents)}, embeddings={len(embeddings)}, "
+                f"metadatas={len(metadatas)} (embedding provider returned a wrong count)"
+            )
+        self.collection.add(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+
     def add_chunks(self, doc_id: str, doc_meta: dict, chunks: list[Chunk]) -> None:
         """
         Add all chunks for a document.
@@ -214,12 +230,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._guarded_add(ids, texts, embeddings, metadatas)
 
     def add_tables(
         self,
@@ -268,12 +279,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._guarded_add(ids, texts, embeddings, metadatas)
 
     def add_figures(
         self,
@@ -324,12 +330,7 @@ class VectorStore:
 
         if ids:
             embeddings = self.embedder.embed(documents, task_type="RETRIEVAL_DOCUMENT")
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
+            self._guarded_add(ids, documents, embeddings, metadatas)
 
     def _cached_embed_query(self, query: str) -> list[float]:
         """Embed a query, returning cached result if available."""
@@ -479,6 +480,25 @@ class VectorStore:
             for chunk_id in results["ids"]
             if self._doc_id_from_chunk_id(chunk_id) in doc_ids
         )
+
+    def count_chunk_types(self, doc_ids: set[str]) -> dict[str, int]:
+        """Exact text/table/figure chunk counts for the given docs, derived from
+        chunk-ID prefixes. Unlike the metadata sample in get_index_stats this is
+        not capped, so it reports the true distribution for large indexes."""
+        counts = {"text": 0, "table": 0, "figure": 0}
+        if not doc_ids:
+            return counts
+        results = self.collection.get(include=[])  # IDs only
+        for chunk_id in results.get("ids") or []:
+            if self._doc_id_from_chunk_id(chunk_id) not in doc_ids:
+                continue
+            if "_chunk_" in chunk_id:
+                counts["text"] += 1
+            elif "_table_" in chunk_id:
+                counts["table"] += 1
+            elif "_fig_" in chunk_id:
+                counts["figure"] += 1
+        return counts
 
     def get_document_meta(self, doc_id: str) -> dict | None:
         """Get metadata for a document's first chunk.

@@ -468,7 +468,11 @@ class TestVisionBudgetGuards:
              patch.object(dashscope_vision_api, "DashScopeVisionAPI") as vision_cls:
             Indexer(config)
 
-        vision_cls.assert_called_once_with(api_key="dashscope-key", model="qwen3-vl-flash")
+        vision_cls.assert_called_once()
+        _args, kwargs = vision_cls.call_args
+        assert kwargs["api_key"] == "dashscope-key"
+        assert kwargs["model"] == "qwen3-vl-flash"
+        assert "result_cache" in kwargs  # vision-results cache wired in
 
     def test_skips_batch_vision_when_table_cap_is_exceeded(self):
         from zotpilot.indexer import Indexer

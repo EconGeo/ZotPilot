@@ -205,6 +205,11 @@ def index_library(
 ) -> dict:
     """Index Zotero PDFs into the vector store. Incremental by default; processes batch_size items per call. Repeat until has_more=false to index all.
 
+    Vision note: any batch_size>0 disables vision table/figure extraction (vision
+    batches across all papers, so small per-call batches are inefficient). When this
+    overrides a configured vision provider the response carries vision_disabled_by_batch
+    plus a _notice_vision. Use batch_size=0 (all-at-once) to index WITH vision.
+
     Concurrency: Only one indexing operation can run at a time. Concurrent calls
     will receive a ToolError: "Indexing in progress, please wait."
 
@@ -215,6 +220,7 @@ def index_library(
     """  # noqa: E501
     if not _index_lock.acquire(blocking=False):
         raise ToolError("Indexing in progress, please wait.")
+    lease = None
     try:
         from dataclasses import replace as dc_replace
 
@@ -245,8 +251,14 @@ def index_library(
         except LeaseContentionError as e:
             raise ToolError(str(e))
 
-        # Batch mode defaults to no_vision to avoid many small vision API calls
+        # Batch mode defaults to no_vision to avoid many small/expensive vision
+        # Batch API calls (vision batches across ALL papers in one request, so a
+        # small per-call batch is inefficient). Track when this silently overrode
+        # a configured-on vision provider so we can surface it explicitly below
+        # instead of leaving the user to wonder why tables were not extracted.
+        vision_disabled_by_batch = False
         if batch_size > 0 and not no_vision:
+            vision_disabled_by_batch = config.vision_enabled
             config = dc_replace(config, vision_enabled=False)
         elif no_vision:
             config = dc_replace(config, vision_enabled=False)
@@ -312,6 +324,15 @@ def index_library(
         if has_more_skipped:
             response["skipped_no_pdf_has_more"] = True
 
+        if vision_disabled_by_batch:
+            response["vision_disabled_by_batch"] = True
+            response["_notice_vision"] = (
+                "Vision table/figure extraction was skipped because batch_size>0 — batched "
+                "indexing disables vision to avoid inefficient per-batch vision API calls. "
+                "To extract tables with vision, run index_library(batch_size=0) for an "
+                "all-at-once pass."
+            )
+
         if skipped_no_pdf_count > 0:
             response["_notice_no_pdf"] = (
                 f"\u26a0\ufe0f {skipped_no_pdf_count} paper(s) skipped during indexing (no PDF attachment). "
@@ -336,7 +357,8 @@ def index_library(
 
         return response
     finally:
-        release_lease(lease)
+        if lease is not None:
+            release_lease(lease)
         _index_lock.release()
 
 
@@ -386,7 +408,6 @@ def get_index_stats(
 
     section_counts: dict[str, int] = defaultdict(int)
     journal_doc_quartiles: dict[str, str] = {}  # doc_id -> quartile
-    chunk_type_counts: dict[str, int] = defaultdict(int)
 
     if sample["metadatas"]:
         for meta in sample["metadatas"]:
@@ -394,9 +415,6 @@ def get_index_stats(
                 continue
             section = meta.get("section", "unknown")
             section_counts[section] += 1
-
-            chunk_type = meta.get("chunk_type", "text")
-            chunk_type_counts[chunk_type] += 1
 
             doc_id = meta.get("doc_id", "")
             quartile = meta.get("journal_quartile", "")
@@ -417,19 +435,32 @@ def get_index_stats(
     except Exception as e:
         logger.warning(f"Could not check for unindexed papers: {e}")
 
+    # chunk_types is EXACT (counted from chunk-ID prefixes, uncapped). section/
+    # journal coverage come from a capped metadata sample and can under-report on
+    # a large index — flag that so the numbers are not misread as exact.
+    chunk_type_counts = store.count_chunk_types(doc_ids)
+    coverage_sampled = total_chunks > _config.stats_sample_limit
+
     result = {
         "total_documents": len(doc_ids),
         "total_chunks": total_chunks,
         "avg_chunks_per_doc": round(total_chunks / len(doc_ids), 1) if doc_ids else 0,
         "section_coverage": dict(section_counts),
         "journal_coverage": dict(journal_counts),
-        "chunk_types": dict(chunk_type_counts),
+        "chunk_types": chunk_type_counts,
+        "coverage_sampled": coverage_sampled,
         "unindexed_count": unindexed_count,
         "unindexed_papers": unindexed_papers,
         "sample_unindexed": unindexed_papers[:5],
         "offset": offset,
         "limit": limit,
     }
+    if coverage_sampled:
+        result["_notice_coverage"] = (
+            f"section_coverage/journal_coverage are sampled from {_config.stats_sample_limit} "
+            f"of {total_chunks} chunks and under-report the true totals. "
+            "chunk_types and total_chunks are exact."
+        )
 
     if unindexed_count:
         sample_note = f" Showing {len(unindexed_papers)} result(s) from offset {offset}." if unindexed_papers else ""
@@ -437,6 +468,30 @@ def get_index_stats(
             f"\u26a0\ufe0f {unindexed_count} paper(s) in Zotero are not yet indexed."
             f"{sample_note} Call index_library() to update the RAG library."
         )
+
+    # Surface half-indexed docs: text chunks committed but table/figure storage
+    # failed (non-quota error, swallowed to a warning during indexing). These read
+    # as fully "indexed" yet are missing their table/figure chunks. Markers are
+    # cleared automatically on a clean reprocess, so what remains is actionable.
+    try:
+        journal_path = Path(_config.chroma_db_path).parent / "index_journal.json"
+        incomplete = {
+            doc_id: reason
+            for doc_id, reason in IndexJournal(journal_path).table_failures.items()
+            if doc_id in doc_ids
+        }
+        if incomplete:
+            result["incomplete_table_docs_count"] = len(incomplete)
+            result["incomplete_table_docs"] = [
+                {"doc_id": d, "reason": r} for d, r in list(incomplete.items())[:50]
+            ]
+            result["_notice_incomplete"] = (
+                f"⚠️ {len(incomplete)} indexed paper(s) are missing table/figure chunks "
+                "(text indexed OK but table/figure storage failed). Re-run with "
+                "index_library(item_keys=[...], force_reindex=True) to backfill them."
+            )
+    except Exception as e:
+        logger.warning(f"Could not read table-failure journal: {e}")
 
     if include_config:
         result["reranking_config"] = _get_reranking_config_impl()

@@ -62,6 +62,7 @@ def _make_indexer(items, indexed_ids=None):
     indexer._config_hash_path.exists.return_value = False
     indexer._config_hash_path.write_text = MagicMock()
     indexer._library_unreachable = MagicMock(return_value=False)
+    indexer._sleep = MagicMock()  # neutralize rate-limit retry waits in tests
     return indexer
 
 
@@ -416,3 +417,343 @@ class TestM1StaleInProgress:
         result2 = _run(indexer, heal, journal=journal)
         assert result2["indexed"] == 1
         assert is_doc_committed(journal, "Y")
+
+
+class TestRateLimitRetry:
+    """issue #15 follow-up: the embedding layer parses retry_after but the
+    indexer used to discard it. These pin that a typed RateLimitError now drives
+    a bounded wait+retry of the same paper before the fail-fast abort fires."""
+
+    def test_transient_429_recovers_within_retry_budget(self):
+        """A paper that 429s twice then succeeds is indexed, not aborted."""
+        from zotpilot.embeddings.base import RateLimitError
+        items = [_make_item("K1"), _make_item("K2"), _make_item("K3")]
+        indexer = _make_indexer(items)
+
+        calls = {"K2": 0}
+
+        def se(item, extraction, journal):
+            if item.item_key == "K2":
+                calls["K2"] += 1
+                if calls["K2"] <= 2:  # fail first two attempts, succeed on third
+                    raise RateLimitError("quota", provider="gemini", retry_after=12.0)
+            return _success(item, extraction, journal)
+
+        result = _run(indexer, se)
+        statuses = {r.item_key: r.status for r in result["results"]}
+        assert statuses == {"K1": "indexed", "K2": "indexed", "K3": "indexed"}
+        assert result["indexed"] == 3
+        assert result["rate_limited_abort"] is False
+        assert calls["K2"] == 3  # 2 failed attempts + 1 success
+        assert indexer._sleep.call_count == 2  # waited once per failed attempt
+        indexer._sleep.assert_called_with(12.0)  # honored the provider retry_after
+
+    def test_retry_exhausted_then_aborts(self):
+        """A persistently 429ing paper retries up to the budget, then aborts —
+        preserving the original fail-fast semantics after recovery fails."""
+        from zotpilot.embeddings.base import RateLimitError
+        items = [_make_item(f"K{i}") for i in range(1, 4)]
+        indexer = _make_indexer(items)
+        indexer._rate_limit_max_retries = 3
+
+        def se(item, extraction, journal):
+            if item.item_key == "K2":
+                raise RateLimitError("quota", provider="gemini", retry_after=5.0)
+            return _success(item, extraction, journal)
+
+        result = _run(indexer, se)
+        assert result["rate_limited_abort"] is True
+        assert result["indexed"] == 1  # K1 only
+        assert indexer._sleep.call_count == 3  # exactly max_retries waits, then abort
+        statuses = {r.item_key: r.status for r in result["results"]}
+        assert statuses["K2"] == "failed" and statuses["K3"] == "failed"
+
+    def test_missing_retry_after_uses_default_wait(self):
+        """A 429 with no retry_after falls back to the default wait, capped."""
+        from zotpilot.embeddings.base import RateLimitError
+        from zotpilot.indexer import RATE_LIMIT_DEFAULT_WAIT_SECONDS, RATE_LIMIT_MAX_WAIT_SECONDS
+        items = [_make_item("K1")]
+        indexer = _make_indexer(items)
+        indexer._rate_limit_max_retries = 1
+
+        seen = {"n": 0}
+
+        def se(item, extraction, journal):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                raise RateLimitError("quota", provider="gemini")  # no retry_after
+            return _success(item, extraction, journal)
+
+        result = _run(indexer, se)
+        assert result["indexed"] == 1
+        indexer._sleep.assert_called_once_with(RATE_LIMIT_DEFAULT_WAIT_SECONDS)
+        assert RATE_LIMIT_DEFAULT_WAIT_SECONDS <= RATE_LIMIT_MAX_WAIT_SECONDS
+
+    def test_bogus_retry_after_is_capped(self):
+        """A wildly large retry_after is clamped to the per-attempt cap."""
+        from zotpilot.embeddings.base import RateLimitError
+        from zotpilot.indexer import RATE_LIMIT_MAX_WAIT_SECONDS
+        items = [_make_item("K1")]
+        indexer = _make_indexer(items)
+        indexer._rate_limit_max_retries = 1
+
+        seen = {"n": 0}
+
+        def se(item, extraction, journal):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                raise RateLimitError("quota", provider="gemini", retry_after=999999.0)
+            return _success(item, extraction, journal)
+
+        _run(indexer, se)
+        indexer._sleep.assert_called_once_with(RATE_LIMIT_MAX_WAIT_SECONDS)
+
+
+class TestEndOfRunRescanGate:
+    """#7: the end-of-run library re-scan only runs when something was indexed.
+    A no-op/all-current call must not pay a second full library enumeration."""
+
+    def test_noop_run_skips_end_of_run_rescan(self):
+        items = [_make_item("K1")]
+        indexer = _make_indexer(items, indexed_ids=["K1"])
+        indexer._needs_reindex = MagicMock(return_value=(False, "current"))
+        result = _run(indexer, _success)
+        assert result["indexed"] == 0
+        # startup reconcile enumerated once; end-of-run skipped → exactly 1
+        assert indexer.zotero.get_all_items_with_pdfs.call_count == 1
+
+    def test_run_that_indexed_still_rescans(self):
+        items = [_make_item("K1")]
+        indexer = _make_indexer(items)
+        result = _run(indexer, _success)
+        assert result["indexed"] == 1
+        assert indexer.zotero.get_all_items_with_pdfs.call_count >= 2
+
+
+def _real_config(tmp_path, *, vision_enabled):
+    from zotpilot.config import Config
+    (tmp_path / "zotero.sqlite").touch()
+    return Config(
+        zotero_data_dir=tmp_path,
+        chroma_db_path=tmp_path / "chroma",
+        embedding_model="none",
+        embedding_dimensions=0,
+        chunk_size=400,
+        chunk_overlap=100,
+        gemini_api_key=None,
+        dashscope_api_key=None,
+        gemini_base_url=None,
+        embedding_provider="none",
+        dashscope_embedding_endpoint="compatible",
+        embedding_timeout=120.0,
+        embedding_max_retries=3,
+        rerank_alpha=0.7,
+        rerank_section_weights=None,
+        rerank_journal_weights=None,
+        rerank_enabled=False,
+        oversample_multiplier=3,
+        oversample_topic_factor=5,
+        stats_sample_limit=10000,
+        ocr_language="eng",
+        openalex_email=None,
+        vision_enabled=vision_enabled,
+        vision_provider="anthropic",
+        vision_model="",
+        anthropic_api_key=None,
+        vision_max_tables_per_run=None,
+        vision_max_cost_usd=None,
+        max_pages=40,
+        preflight_enabled=True,
+        zotero_api_key=None,
+        zotero_user_id=None,
+        zotero_library_type="user",
+        semantic_scholar_api_key=None,
+    )
+
+
+class TestVisionDisabledByBatchNotice:
+    """#5: batch_size>0 silently disables vision; the override must be surfaced."""
+
+    def _run_tool(self, config, **kwargs):
+        from zotpilot.tools import indexing as idx_mod
+        fake_indexer = MagicMock()
+        fake_indexer.index_all.return_value = {
+            "results": [], "indexed": 0, "failed": 0, "empty": 0, "skipped": 0,
+            "already_indexed": 0, "rate_limited_abort": False, "systemic_abort": False,
+            "not_indexed_due_to_abort": 0, "has_more": False, "skipped_no_pdf": [],
+        }
+        with patch("zotpilot.indexer.Indexer", return_value=fake_indexer), \
+             patch.object(idx_mod, "_get_config", return_value=config), \
+             patch.object(idx_mod, "_get_store") as get_store, \
+             patch.object(idx_mod, "IndexJournal"), \
+             patch.object(idx_mod, "IndexLease"), \
+             patch.object(idx_mod, "acquire_lease"), \
+             patch.object(idx_mod, "release_lease"):
+            get_store.return_value.clear_query_cache = MagicMock()
+            return idx_mod.index_library(**kwargs)
+
+    def test_batch_disables_vision_is_surfaced(self, tmp_path):
+        config = _real_config(tmp_path, vision_enabled=True)
+        resp = self._run_tool(config, batch_size=2)
+        assert resp["vision_disabled_by_batch"] is True
+        assert "_notice_vision" in resp
+        assert resp["vision_enabled"] is False
+
+    def test_all_at_once_keeps_vision_no_notice(self, tmp_path):
+        config = _real_config(tmp_path, vision_enabled=True)
+        resp = self._run_tool(config, batch_size=0)
+        assert "vision_disabled_by_batch" not in resp
+        assert resp["vision_enabled"] is True
+
+    def test_explicit_no_vision_is_not_flagged_as_batch_override(self, tmp_path):
+        config = _real_config(tmp_path, vision_enabled=True)
+        resp = self._run_tool(config, batch_size=0, no_vision=True)
+        assert "vision_disabled_by_batch" not in resp
+        assert resp["vision_enabled"] is False
+
+
+class TestTableFailureMarkerCleared:
+    """#2: stale table/figure-failure markers must be cleared when a doc is
+    reprocessed cleanly, so they don't linger and read as still-broken forever."""
+
+    def _extraction_with_tables(self):
+        extraction = MagicMock()
+        page = MagicMock()
+        page.markdown = "body"
+        extraction.pages = [page]
+        extraction.full_markdown = "body"
+        extraction.sections = []
+        extraction.stats = {"text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        extraction.quality_grade = "A"
+        table = MagicMock()
+        table.artifact_type = None
+        table.caption = "Results overview"
+        extraction.tables = [table]
+        extraction.figures = []
+        return extraction
+
+    def _indexer(self, item):
+        indexer = _make_indexer([item])
+        indexer.store.add_chunks = MagicMock()
+        indexer.chunker = MagicMock()
+        indexer.chunker.chunk.return_value = [MagicMock()]
+        indexer.journal_ranker = MagicMock()
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        return indexer
+
+    def test_marker_recorded_then_cleared_on_clean_reprocess(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal
+        item = _make_item("K1")
+        indexer = self._indexer(item)
+        journal = IndexJournal(tmp_path / "index_journal.json")
+
+        with patch("zotpilot.pdf.reference_matcher.match_references", return_value={}), \
+             patch("zotpilot.pdf.reference_matcher.get_reference_context", return_value=""):
+            # Run 1: table storage fails (non-429) -> marker recorded.
+            indexer.store.add_tables = MagicMock(side_effect=RuntimeError("boom"))
+            indexer._index_extraction(item, self._extraction_with_tables(), journal)
+            assert "K1" in journal.table_failures
+
+            # Run 2: table storage succeeds -> stale marker cleared.
+            indexer.store.add_tables = MagicMock()
+            indexer._index_extraction(item, self._extraction_with_tables(), journal)
+            assert "K1" not in journal.table_failures
+
+        # Persisted clear survives a reload.
+        assert "K1" not in IndexJournal(tmp_path / "index_journal.json").table_failures
+
+
+class TestGetIndexStatsSurfacesIncomplete:
+    """#2: get_index_stats surfaces half-indexed docs (table_failures) that are
+    still in the indexed set, so the user can selectively force_reindex them."""
+
+    def test_incomplete_table_docs_surfaced(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal, mark_committed, record_table_failure
+        from zotpilot.tools import indexing as idx_mod
+
+        chroma = tmp_path / "chroma"
+        chroma.mkdir()
+        # K1 is indexed but lost its tables; K9 is stale (not in current index) and must be filtered out.
+        journal = IndexJournal(tmp_path / "index_journal.json")
+        for k in ("K1", "K9"):
+            mark_committed(journal, k)
+            record_table_failure(journal, k, "table storage: boom")
+
+        config = MagicMock()
+        config.embedding_provider = "local"
+        config.chroma_db_path = chroma
+        config.stats_sample_limit = 100
+
+        store = MagicMock()
+        store.count_chunks_for_doc_ids.return_value = 3
+        store.collection.get.return_value = {"metadatas": []}
+
+        with patch.object(idx_mod, "_get_config", return_value=config), \
+             patch.object(idx_mod, "_get_retriever"), \
+             patch.object(idx_mod, "_get_store", return_value=store), \
+             patch.object(idx_mod, "_get_zotero"), \
+             patch.object(idx_mod, "current_library_pdf_doc_ids", return_value={"K1"}), \
+             patch.object(idx_mod, "authoritative_indexed_doc_ids", return_value={"K1"}), \
+             patch.object(idx_mod, "_collect_unindexed_papers", return_value=([], 0)):
+            result = idx_mod.get_index_stats()
+
+        assert result["incomplete_table_docs_count"] == 1  # K9 filtered (not current)
+        assert result["incomplete_table_docs"] == [{"doc_id": "K1", "reason": "table storage: boom"}]
+        assert "_notice_incomplete" in result
+
+
+class TestTableMarkerOrdering:
+    """#2 regression: clear_table_failure must run only AFTER tables+figures store
+    cleanly, so a failure (esp. a re-raised RateLimitError) keeps the marker."""
+
+    def _ext(self):
+        extraction = MagicMock()
+        page = MagicMock()
+        page.markdown = "body"
+        extraction.pages = [page]
+        extraction.full_markdown = "body"
+        extraction.sections = []
+        extraction.stats = {"text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        extraction.quality_grade = "A"
+        table = MagicMock()
+        table.artifact_type = None
+        table.caption = "Results"
+        extraction.tables = [table]
+        extraction.figures = []
+        return extraction
+
+    def _idx(self, item):
+        indexer = _make_indexer([item])
+        indexer.store.add_chunks = MagicMock()
+        indexer.chunker = MagicMock()
+        indexer.chunker.chunk.return_value = [MagicMock()]
+        indexer.journal_ranker = MagicMock()
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        return indexer
+
+    def test_marker_kept_when_table_fails_this_run(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal
+        item = _make_item("K1")
+        indexer = self._idx(item)
+        indexer.store.add_tables = MagicMock(side_effect=RuntimeError("boom"))
+        journal = IndexJournal(tmp_path / "j.json")
+        with patch("zotpilot.pdf.reference_matcher.match_references", return_value={}), \
+             patch("zotpilot.pdf.reference_matcher.get_reference_context", return_value=""):
+            indexer._index_extraction(item, self._ext(), journal)
+        # swallowed failure this run → marker present, NOT cleared at end
+        assert "K1" in journal.table_failures
+
+    def test_prior_marker_survives_table_ratelimit(self, tmp_path):
+        from zotpilot.embeddings.base import RateLimitError
+        from zotpilot.index_authority import IndexJournal, record_table_failure
+        item = _make_item("K1")
+        indexer = self._idx(item)
+        indexer.store.add_tables = MagicMock(side_effect=RateLimitError("quota", provider="gemini"))
+        journal = IndexJournal(tmp_path / "j.json")
+        record_table_failure(journal, "K1", "prior failure")  # stale marker from a prior run
+        with patch("zotpilot.pdf.reference_matcher.match_references", return_value={}), \
+             patch("zotpilot.pdf.reference_matcher.get_reference_context", return_value=""):
+            with pytest.raises(RateLimitError):
+                indexer._index_extraction(item, self._ext(), journal)
+        # 429 re-raises before the end-of-function clear → prior marker intact
+        assert "K1" in journal.table_failures
