@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] - 2026-06-08
+
+### Fixed
+- **`__version__` 与发布版本一致 / version reporting** —— `zotpilot --version`、`status` 与 skill 版本标记此前在 0.5.1 仍显示 `0.5.0`（`src/zotpilot/__init__.py` 漏同步），现已修正。功能无变化。
+
 ## [0.5.1] - 2026-06-08
 
 **单篇精读 + 更自由的嵌入 + 更稳的索引 / Deep reading + flexible embeddings + safer indexing** — 新增单篇论文 AI 导读、嵌入模型选择更自由，并从源头加固了索引的抽取质量、可靠性与数据安全。
