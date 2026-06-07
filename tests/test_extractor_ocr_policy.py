@@ -23,3 +23,34 @@ def test_ocr_policy_skips_mixed_documents_with_enough_native_text():
         page_count=4,
         near_empty_pages=2,
     ) is False
+
+
+from zotpilot.pdf.extractor import _native_page_chunks, _should_prefer_native
+
+
+class TestNativeFloor:
+    """pymupdf4llm's internal OCR can clobber a good text layer with near-empty
+    output; we fall back to native text when it under-extracts."""
+
+    def test_prefers_native_when_md_clobbered(self):
+        # to_markdown returned 0 chars but native layer has 5037 → use native
+        assert _should_prefer_native(md_chars=0, native_total=5037) is True
+        assert _should_prefer_native(md_chars=50, native_total=5037) is True
+
+    def test_keeps_markdown_when_comparable(self):
+        # to_markdown stripped headers/footers but kept most text → keep markdown
+        assert _should_prefer_native(md_chars=4000, native_total=5000) is False
+        assert _should_prefer_native(md_chars=2600, native_total=5000) is False  # 52% > 50%
+
+    def test_does_not_fire_for_scanned_pdf(self):
+        # native layer itself near-empty (scanned) → leave to the gated OCR fallback
+        assert _should_prefer_native(md_chars=10, native_total=150) is False
+        assert _should_prefer_native(md_chars=0, native_total=0) is False
+
+    def test_native_page_chunks_shape(self):
+        chunks = _native_page_chunks(["page one", "page two"])
+        assert len(chunks) == 2
+        assert chunks[0]["text"] == "page one"
+        assert chunks[0]["metadata"]["page_number"] == 1
+        assert chunks[1]["metadata"]["page_number"] == 2
+        assert chunks[0]["page_boxes"] == []
