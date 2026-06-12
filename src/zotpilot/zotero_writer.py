@@ -440,6 +440,39 @@ class ZoteroWriter:
             logger.warning("delete_item(%s) failed: %s", item_key, e)
             return False
 
+    def delete_note(self, note_key: str, require_zotpilot: bool = True) -> dict:
+        """Delete a child note by its key (moves it to Zotero trash).
+
+        Safety: only items of itemType 'note' are deletable here — never a
+        paper or attachment. By default refuses notes not created by ZotPilot
+        (those lacking the '[ZotPilot]' marker); pass require_zotpilot=False to
+        delete any note by key.
+
+        Returns:
+            {"deleted": True, "note_key": ..., "parent_key": ...} on success, or
+            {"deleted": False, "reason": ..., "note_key": ...} when a guard blocks it.
+        """
+        try:
+            item = self._zot.item(note_key)
+        except Exception as e:
+            logger.warning("delete_note(%s) lookup failed: %s", note_key, e)
+            return {"deleted": False, "reason": "not_found", "note_key": note_key}
+
+        data = item.get("data", {})
+        if data.get("itemType") != "note":
+            return {
+                "deleted": False,
+                "reason": "not_a_note",
+                "note_key": note_key,
+                "item_type": data.get("itemType"),
+            }
+
+        if require_zotpilot and "[ZotPilot]" not in (data.get("note") or ""):
+            return {"deleted": False, "reason": "not_a_zotpilot_note", "note_key": note_key}
+
+        self._zot.delete_item(item)
+        return {"deleted": True, "note_key": note_key, "parent_key": data.get("parentItem")}
+
     def check_has_pdf(self, item_key: str) -> bool:
         """Return True if the item has at least one PDF attachment in Zotero."""
         try:
