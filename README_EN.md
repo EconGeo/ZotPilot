@@ -133,7 +133,7 @@ zotpilot setup                 # interactive config + skill deploy + MCP registe
 # Restart your AI client
 ```
 
-Then tell your agent "search my library for X" or "survey recent papers on Y". It will chain 18 MCP tools and 4 packaged skills to complete the job.
+Then tell your agent "search my library for X" or "survey recent papers on Y". It will chain 19 MCP tools and 4 packaged skills to complete the job.
 
 **Prerequisites**: [Zotero 8](https://www.zotero.org/download/) installed and launched at least once · Python 3.10+ · a supported AI agent client (Claude Code / Codex / OpenCode). The ingestion workflow also needs the [Connector browser extension](#install-details).
 
@@ -147,7 +147,7 @@ ZotPilot has three parts:
 
 | Component | Role |
 |------|------|
-| **MCP Server** | 18 atomic tools for semantic search, citation graph, ingestion, and library management |
+| **MCP Server** | 19 atomic tools for semantic search, citation graph, ingestion, and library management |
 | **Connector** | Chrome extension; the agent saves papers through your real browser session and keeps institution-access PDFs |
 | **Agent Skills** | Chain the tools into complete research workflows instead of isolated calls |
 
@@ -380,7 +380,7 @@ Agent ──→ MCP tools ───┬── semantic search ──→ ChromaDB 
 - **Write ops**: tags / collections / notes go through Zotero's official Web API and sync back to the desktop client.
 
 <details>
-<summary><b>MCP tool list (18)</b></summary>
+<summary><b>MCP tool list (19)</b></summary>
 
 | Category | Tools |
 |------|------|
@@ -388,7 +388,7 @@ Agent ──→ MCP tools ───┬── semantic search ──→ ChromaDB 
 | Read | `get_passage_context`, `get_paper_details`, `get_notes`, `get_annotations`, `browse_library`, `profile_library` |
 | Discover | `search_academic_databases` |
 | Ingest | `ingest_by_identifiers` |
-| Organize | `manage_tags`, `manage_collections`, `create_note` |
+| Organize | `manage_tags`, `manage_collections`, `create_note`, `delete_note` |
 | Citations | `get_citations` |
 | Index | `index_library`, `get_index_stats` |
 

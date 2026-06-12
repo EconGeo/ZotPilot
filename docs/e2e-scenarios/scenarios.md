@@ -5,7 +5,7 @@
 
 ## 清理策略
 
-**无 MCP delete 工具**，清理方式：
+**无 MCP 条目删除工具**（`delete_note` 仅删笔记，不能删条目），清理方式：
 - 每个测试条目在入库时打 `["e2e-test"]` 标签
 - PASS 后：**不调用 `set_item_tags`**（会抹掉用户原有标签）；条目保留在库中，由人工在 Zotero 批量删除带 `e2e-test` 标签的条目
 - FAIL 后：追加 `e2e-fail-SCENID` 标签（用 `add_item_tags`，不覆盖已有标签），供人工复查
