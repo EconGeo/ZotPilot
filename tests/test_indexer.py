@@ -27,6 +27,318 @@ class TestConfigHash:
 
         assert _config_hash(base) != _config_hash(native)
 
+    def test_formula_ocr_settings_do_not_affect_index_hash(self):
+        from zotpilot.indexer import _config_hash
+
+        base = SimpleNamespace(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="local",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=384,
+            embedding_model="local",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+            formula_ocr_enabled=False,
+            formula_ocr_provider="local",
+        )
+        formula_enabled = SimpleNamespace(
+            **{
+                **base.__dict__,
+                "formula_ocr_enabled": True,
+                "formula_ocr_max_formulas_per_doc": 12,
+                "formula_ocr_min_confidence": 0.8,
+            }
+        )
+
+        assert _config_hash(base) == _config_hash(formula_enabled)
+
+
+class TestFormulaBackfill:
+    def _hash_config(self):
+        return SimpleNamespace(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="local",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=384,
+            embedding_model="local",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+            formula_ocr_enabled=True,
+            formula_ocr_provider="local",
+            formula_ocr_max_formulas_per_doc=40,
+            formula_ocr_max_formulas_per_page=6,
+            formula_ocr_min_confidence=0.6,
+        )
+
+    def test_backfill_requires_existing_matching_config_hash(self, tmp_path):
+        from zotpilot.indexer import ConfigDriftError, Indexer, _config_hash
+
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = self._hash_config()
+        indexer._config_hash_path = tmp_path / "config_hash.txt"
+
+        with pytest.raises(ConfigDriftError, match="config hash exists"):
+            indexer._assert_config_hash_current()
+
+        indexer._config_hash_path.write_text("stale")
+        with pytest.raises(ConfigDriftError, match="differs"):
+            indexer._assert_config_hash_current()
+
+        indexer._config_hash_path.write_text(_config_hash(indexer.config))
+        indexer._assert_config_hash_current()
+
+    def test_index_formulas_backfills_already_indexed_docs(self, tmp_path):
+        from zotpilot.indexer import Indexer
+        from zotpilot.models import ExtractedFormula, ZoteroItem
+
+        pdf_path = tmp_path / "paper.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4")
+        item = ZoteroItem(
+            item_key="DOC1",
+            title="Paper",
+            authors="Auth",
+            year=2024,
+            pdf_path=pdf_path,
+            citation_key="auth2024",
+            publication="Nature",
+        )
+
+        formula = ExtractedFormula(
+            page_num=1,
+            formula_index=0,
+            bbox=(0, 0, 10, 10),
+            latex=r"E = mc^2",
+        )
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = self._hash_config()
+        indexer.store = MagicMock()
+        indexer.store.get_indexed_doc_ids.return_value = {"DOC1", "DOC2"}
+        indexer.zotero = MagicMock()
+        indexer.zotero.get_all_items_with_pdfs.return_value = [item]
+        indexer.journal_ranker = MagicMock()
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        indexer._ensure_formula_provider_available = MagicMock()
+        indexer._assert_config_hash_current = MagicMock()
+        indexer._pdf_hash = MagicMock(return_value="hash")
+        indexer._recognize_formulas_for_item = MagicMock(return_value=[formula])
+
+        result = indexer.index_formulas()
+
+        assert result["processed"] == 1
+        assert result["formulas_indexed"] == 1
+        indexer._ensure_formula_provider_available.assert_called_once()
+        indexer._assert_config_hash_current.assert_called_once()
+        indexer.store.delete_chunks_by_type.assert_called_once_with("DOC1", "formula")
+        indexer.store.add_formulas.assert_called_once()
+
+    def test_formula_provider_preflight_has_actionable_install_hint(self):
+        from zotpilot.indexer import FormulaProviderUnavailableError, Indexer
+
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = SimpleNamespace(
+            formula_ocr_enabled=True,
+            formula_ocr_provider="local",
+        )
+        indexer._get_formula_provider = MagicMock()
+
+        with patch("zotpilot.feature_extraction.formula_ocr.importlib.util.find_spec", return_value=None):
+            with pytest.raises(FormulaProviderUnavailableError) as exc_info:
+                indexer._ensure_formula_provider_available()
+
+        message = str(exc_info.value)
+        assert "zotpilot[formula]" in message
+        assert "formula_ocr_enabled=false" in message
+        indexer._get_formula_provider.assert_not_called()
+
+    def test_formula_provider_preflight_does_not_load_model_when_available(self):
+        from zotpilot.indexer import Indexer
+
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = SimpleNamespace(
+            formula_ocr_enabled=True,
+            formula_ocr_provider="local",
+        )
+        indexer._get_formula_provider = MagicMock()
+
+        with patch("zotpilot.feature_extraction.formula_ocr.importlib.util.find_spec", return_value=object()):
+            indexer._ensure_formula_provider_available()
+
+        indexer._get_formula_provider.assert_not_called()
+
+    def test_formula_provider_preflight_skips_when_disabled(self):
+        from zotpilot.indexer import Indexer
+
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = SimpleNamespace(formula_ocr_enabled=False)
+        indexer._get_formula_provider = MagicMock()
+
+        indexer._ensure_formula_provider_available()
+
+        indexer._get_formula_provider.assert_not_called()
+
+    def test_formula_backfill_keeps_existing_chunks_when_refresh_finds_none(self, tmp_path):
+        from zotpilot.indexer import Indexer
+        from zotpilot.models import ZoteroItem
+
+        pdf_path = tmp_path / "paper.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4")
+        item = ZoteroItem(
+            item_key="DOC1",
+            title="Paper",
+            authors="Auth",
+            year=2024,
+            pdf_path=pdf_path,
+            citation_key="auth2024",
+            publication="Nature",
+        )
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = self._hash_config()
+        indexer.store = MagicMock()
+        indexer.store.get_indexed_doc_ids.return_value = {"DOC1"}
+        indexer.store.count_chunk_types.return_value = {"text": 3, "table": 0, "figure": 0, "formula": 2}
+        indexer.zotero = MagicMock()
+        indexer.zotero.get_all_items_with_pdfs.return_value = [item]
+        indexer.journal_ranker = MagicMock()
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        indexer._ensure_formula_provider_available = MagicMock()
+        indexer._assert_config_hash_current = MagicMock()
+        indexer._pdf_hash = MagicMock(return_value="hash")
+        indexer._recognize_formulas_for_item = MagicMock(return_value=[])
+
+        result = indexer.index_formulas(refresh_existing=True)
+
+        assert result["processed"] == 1
+        assert result["formulas_indexed"] == 0
+        assert result["results"][0]["existing_formulas_kept"] == 2
+        indexer.store.delete_chunks_by_type.assert_not_called()
+        indexer.store.add_formulas.assert_not_called()
+
+    def test_formula_failure_does_not_block_table_failure_cleanup(self, tmp_path):
+        from zotpilot.index_authority import IndexJournal, mark_committed, record_table_failure
+        from zotpilot.indexer import Indexer
+        from zotpilot.models import Chunk, ExtractedFormula, PageExtraction, ZoteroItem
+
+        pdf_path = tmp_path / "paper.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4")
+        item = ZoteroItem(
+            item_key="DOC1",
+            title="Paper",
+            authors="Auth",
+            year=2024,
+            pdf_path=pdf_path,
+            citation_key="auth2024",
+            publication="Nature",
+        )
+        extraction = SimpleNamespace(
+            pages=[PageExtraction(page_num=1, markdown="Body text", char_start=0)],
+            full_markdown="Body text",
+            sections=[],
+            tables=[],
+            figures=[],
+            stats={"text_pages": 1, "ocr_pages": 0, "empty_pages": 0},
+            quality_grade="A",
+            formulas=[],
+        )
+        chunk = Chunk(
+            text="Body text",
+            chunk_index=0,
+            page_num=1,
+            char_start=0,
+            char_end=9,
+            section="body",
+        )
+        formula = ExtractedFormula(
+            page_num=1,
+            formula_index=0,
+            bbox=(0, 0, 10, 10),
+            latex=r"E = mc^2",
+        )
+        journal = IndexJournal(tmp_path / "journal.json")
+        mark_committed(journal, item.item_key)
+        record_table_failure(journal, item.item_key, "table storage: stale")
+
+        indexer = Indexer.__new__(Indexer)
+        indexer.config = SimpleNamespace(formula_ocr_enabled=True)
+        indexer.chunker = MagicMock()
+        indexer.chunker.chunk.return_value = [chunk]
+        indexer.journal_ranker = MagicMock()
+        indexer.journal_ranker.lookup.return_value = "Q1"
+        indexer.store = MagicMock()
+        indexer.store.add_formulas.side_effect = RuntimeError("formula boom")
+        indexer._pdf_hash = MagicMock(return_value="hash")
+        indexer._recognize_formulas_for_item = MagicMock(return_value=[formula])
+
+        with patch("zotpilot.indexer.record_table_failure") as mock_record_failure:
+            n_chunks, n_tables, reason, _stats, quality = indexer._index_extraction(
+                item,
+                extraction,
+                journal,
+            )
+
+        assert n_chunks == 1
+        assert n_tables == 0
+        assert reason == ""
+        assert quality == "A"
+        indexer.store.add_formulas.assert_called_once()
+        mock_record_failure.assert_not_called()
+        assert item.item_key not in journal.table_failures
+        assert "table_failure" not in journal.committed[item.item_key]
+
+    def test_formula_provider_error_is_tool_error_for_index_formulas(self, tmp_path):
+        from zotpilot.indexer import FormulaProviderUnavailableError
+        from zotpilot.state import ToolError
+        from zotpilot.tools import indexing as idx_mod
+
+        config = MagicMock()
+        config.validate.return_value = []
+        config.formula_ocr_enabled = True
+        config.chroma_db_path = tmp_path / "chroma"
+
+        class FakeIndexer:
+            def __init__(self, _config):
+                pass
+
+            def index_formulas(self, **_kwargs):
+                raise FormulaProviderUnavailableError("Install `zotpilot[formula]`")
+
+        with patch.object(idx_mod, "_get_config", return_value=config), \
+             patch.object(idx_mod, "acquire_lease"), \
+             patch.object(idx_mod, "release_lease"), \
+             patch("zotpilot.indexer.Indexer", FakeIndexer):
+            with pytest.raises(ToolError, match="zotpilot\\[formula\\]"):
+                idx_mod.index_formulas()
+
+    def test_formula_provider_error_is_tool_error_for_index_library(self, tmp_path):
+        from zotpilot.indexer import FormulaProviderUnavailableError
+        from zotpilot.state import ToolError
+        from zotpilot.tools import indexing as idx_mod
+
+        config = MagicMock()
+        config.validate.return_value = []
+        config.chroma_db_path = tmp_path / "chroma"
+        config.max_pages = 0
+        config.vision_enabled = False
+
+        class FakeIndexer:
+            def __init__(self, _config):
+                pass
+
+            def index_all(self, **_kwargs):
+                raise FormulaProviderUnavailableError("Install `zotpilot[formula]`")
+
+        with patch.object(idx_mod, "_get_config", return_value=config), \
+             patch.object(idx_mod, "acquire_lease"), \
+             patch.object(idx_mod, "release_lease"), \
+             patch("zotpilot.indexer.Indexer", FakeIndexer):
+            with pytest.raises(ToolError, match="zotpilot\\[formula\\]"):
+                idx_mod.index_library(batch_size=0)
+
 
 class TestTitlePatternValidation:
     """Test P0-3: ReDoS protection on title_pattern in Indexer.index_all()."""
