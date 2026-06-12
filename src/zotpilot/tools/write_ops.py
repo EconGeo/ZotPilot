@@ -188,6 +188,24 @@ def create_note(
     return result
 
 
+@mcp.tool(tags=tool_tags("extended", "write"))
+def delete_note(
+    note_key: Annotated[str, Field(description="Zotero item key of the NOTE to delete")],
+    require_zotpilot: Annotated[
+        bool,
+        Field(description="If true (default), only delete notes created by ZotPilot "
+                          "(marked '[ZotPilot]'); refuse otherwise. Set false to delete any note by key."),
+    ] = True,
+) -> dict:
+    """Delete a child note by its key. Requires ZOTERO_API_KEY.
+
+    Safety: only items of type 'note' are deletable here — never a paper or
+    attachment. Returns {"deleted": True/False, ...}; when False, 'reason' explains
+    (not_found / not_a_note / not_a_zotpilot_note).
+    """
+    return _get_writer().delete_note(note_key, require_zotpilot=require_zotpilot)
+
+
 def _extract_tag_item(item) -> tuple[str | None, list[str] | None]:
     """Extract item_key and tags from a TagItem (dict at runtime)."""
     item_key = item.get("item_key") if isinstance(item, dict) else getattr(item, "item_key", None)

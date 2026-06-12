@@ -57,3 +57,13 @@ def test_delete_note_not_found(writer):
     assert result["deleted"] is False
     assert result["reason"] == "not_found"
     writer._zot.delete_item.assert_not_called()
+
+
+def test_delete_note_tool_delegates_to_writer():
+    from zotpilot.tools import write_ops
+    mock_writer = MagicMock()
+    mock_writer.delete_note.return_value = {"deleted": True, "note_key": "N1", "parent_key": "P1"}
+    with patch("zotpilot.tools.write_ops._get_writer", return_value=mock_writer):
+        result = write_ops.delete_note("N1")
+    assert result == {"deleted": True, "note_key": "N1", "parent_key": "P1"}
+    mock_writer.delete_note.assert_called_once_with("N1", require_zotpilot=True)
