@@ -1,10 +1,30 @@
 """Tests for the Indexer pipeline — specifically P0-3 ReDoS protection."""
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@dataclass
+class _HashCfg:
+    """Minimal real dataclass carrying every field _config_hash reads.
+
+    A real dataclass (not a MagicMock/SimpleNamespace) is required so
+    ``dataclasses.replace`` works inside ``_vision_only_drift``.
+    """
+    chunk_size: int = 400
+    chunk_overlap: int = 100
+    embedding_provider: str = "local"
+    dashscope_embedding_endpoint: str = "compatible"
+    embedding_dimensions: int = 384
+    embedding_model: str = "local"
+    ocr_language: str = "eng"
+    vision_enabled: bool = True
+    vision_provider: str = "anthropic"
+    vision_model: str = ""
 
 
 class TestConfigHash:
@@ -54,6 +74,31 @@ class TestConfigHash:
         )
 
         assert _config_hash(base) == _config_hash(formula_enabled)
+
+    def test_vision_only_drift_detects_disabled_vision(self):
+        """When the sole change vs the stored index is the vision toggle (as a
+        batch_size>0/no_vision run leaves it), _vision_only_drift must report True."""
+        from zotpilot.config import _config_hash, _vision_only_drift
+
+        stored = _config_hash(_HashCfg(vision_enabled=True))
+        assert _vision_only_drift(_HashCfg(vision_enabled=False), stored) is True
+        # Symmetric: stored built vision-off, current vision-on, only vision differs.
+        stored_off = _config_hash(_HashCfg(vision_enabled=False))
+        assert _vision_only_drift(_HashCfg(vision_enabled=True), stored_off) is True
+
+    def test_vision_only_drift_false_when_other_field_changed(self):
+        """A real embedding-space change (chunk size) alongside vision must NOT be
+        misreported as a vision-only drift — that case genuinely needs a rebuild."""
+        from zotpilot.config import _config_hash, _vision_only_drift
+
+        stored = _config_hash(_HashCfg(vision_enabled=True, chunk_size=400))
+        assert _vision_only_drift(_HashCfg(vision_enabled=False, chunk_size=800), stored) is False
+
+    def test_vision_only_drift_degrades_for_non_dataclass(self):
+        """Non-dataclass configs (mocks) can't be replace()d — degrade to False."""
+        from zotpilot.config import _vision_only_drift
+
+        assert _vision_only_drift(MagicMock(), "any-stored-hash") is False
 
 
 class TestFormulaBackfill:
@@ -746,6 +791,46 @@ class TestSkipTracking:
              pytest.raises(ConfigDriftError, match="--force"):
             indexer.index_all(batch_size=None)
 
+        # Blocked before any extraction/indexing work.
+        mock_extract.assert_not_called()
+        mock_index_extraction.assert_not_called()
+
+    def test_vision_built_index_with_batch_steers_to_batch_size_zero(self, tmp_path):
+        """UX sharp edge: a vision-built index indexed with batch_size>0 (which auto-
+        disables vision) trips the drift guard. The error must steer the user to
+        batch_size=0 for an incremental pass, NOT force_reindex (which would rebuild
+        every paper and re-spend embedding quota)."""
+        from unittest.mock import patch
+
+        import pytest
+
+        from zotpilot.config import _config_hash
+        from zotpilot.indexer import ConfigDriftError
+
+        item = self._make_item("K1", "Paper A", has_pdf=True)
+        indexer = self._make_indexer([item])
+        self._patch_indexer(indexer)
+        # The MCP/CLI batch path hands the Indexer a vision-DISABLED config; model that
+        # with a real dataclass so _vision_only_drift can replace()/re-hash it.
+        indexer.config = _HashCfg(vision_enabled=False)
+        indexer.store.get_indexed_doc_ids.return_value = {"K1"}
+
+        # Persisted hash reflects the original vision-ON build (the only difference).
+        stored = _config_hash(_HashCfg(vision_enabled=True))
+        indexer._config_hash_path.exists.return_value = True
+        indexer._config_hash_path.read_text.return_value = stored
+
+        with patch("zotpilot.indexer.extract_document") as mock_extract, \
+             patch.object(indexer, "_index_extraction") as mock_index_extraction, \
+             pytest.raises(ConfigDriftError) as exc_info:
+            indexer.index_all(batch_size=2)
+
+        message = str(exc_info.value)
+        # Actionable: keep vision on via batch_size=0.
+        assert "batch_size=0" in message
+        # Explicitly warns AGAINST the quota-burning force-rebuild.
+        assert "force_reindex" in message
+        assert "Do NOT" in message
         # Blocked before any extraction/indexing work.
         mock_extract.assert_not_called()
         mock_index_extraction.assert_not_called()

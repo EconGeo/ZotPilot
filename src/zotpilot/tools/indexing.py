@@ -210,6 +210,13 @@ def index_library(
     overrides a configured vision provider the response carries vision_disabled_by_batch
     plus a _notice_vision. Use batch_size=0 (all-at-once) to index WITH vision.
 
+    Vision-built index + batch_size>0 = ConfigDriftError, NOT a reason to force-rebuild.
+    If the existing index was built WITH vision, a batch_size>0 (or no_vision) call
+    disables vision and that single toggle trips the config-drift guard. The fix is
+    index_library(batch_size=0) to keep vision on and index the remaining papers
+    incrementally — do NOT pass force_reindex=True, which would rebuild every already-
+    indexed paper and re-spend embedding quota. The drift error message says this too.
+
     Concurrency: Only one indexing operation can run at a time. Concurrent calls
     will receive a ToolError: "Indexing in progress, please wait."
 

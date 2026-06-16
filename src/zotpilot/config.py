@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -433,3 +433,24 @@ def _config_hash(config: "Config") -> str:
     if config.embedding_provider == "openai-compatible":
         data += f":{getattr(config, 'embedding_base_url', '') or ''}"
     return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+
+def _vision_only_drift(config: "Config", stored_hash: str) -> bool:
+    """True when the ONLY index-affecting change vs the stored index is the vision toggle.
+
+    ``batch_size>0`` (and ``no_vision``) disable vision, which flips
+    ``vision_enabled`` and therefore the config hash -- even though no
+    embedding-space field (chunking, provider, model, dimensions, OCR) actually
+    changed. Re-enabling vision and re-hashing reproduces the stored hash, which
+    proves the drift is *only* the vision flag. Such a "drift" needs no full
+    rebuild: the caller can keep vision on (``batch_size=0``) and index
+    incrementally instead of burning embedding quota on a force-rebuild.
+
+    Returns False for any config that is not a dataclass instance (e.g. test
+    doubles / mocks), degrading to the generic drift message.
+    """
+    try:
+        flipped = replace(config, vision_enabled=not config.vision_enabled)
+    except TypeError:
+        return False
+    return _config_hash(flipped) == stored_hash

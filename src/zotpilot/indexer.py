@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from .config import Config, _config_hash
+from .config import Config, _config_hash, _vision_only_drift
 from .embeddings import create_embedder
 from .embeddings.base import RateLimitError
 from .index_authority import (
@@ -573,6 +573,31 @@ class Indexer:
                 config_hash,
             )
             progress("run_failed", reason="config_drift")
+            # Common false alarm: the stored index was built WITH vision but this
+            # run disabled it (batch_size>0 auto-disables vision, or no_vision was
+            # set), and that single toggle -- not any embedding-space change --
+            # tripped the guard. Steer to the cheap fix (keep vision on, index
+            # incrementally) instead of a force-rebuild that re-spends embedding
+            # quota on every already-indexed paper.
+            if _vision_only_drift(self.config, stored_hash):
+                if not self.config.vision_enabled:
+                    raise ConfigDriftError(
+                        "This index was built WITH vision, but this run disabled it "
+                        "(batch_size>0 auto-disables vision, or no_vision/--no-vision was set), "
+                        "and that single change -- not the embedding space -- tripped the drift "
+                        "guard. To index the remaining papers incrementally, keep vision ON: "
+                        "re-run with batch_size=0 (API: index_library(batch_size=0); CLI: drop "
+                        "--no-vision). Do NOT use force_reindex/--force here -- it would rebuild "
+                        "every already-indexed paper and re-spend embedding quota, when only an "
+                        "incremental pass is needed."
+                    )
+                raise ConfigDriftError(
+                    "This index was built WITHOUT vision, but this run enabled it, and that "
+                    "single change tripped the drift guard. To index incrementally, match the "
+                    "stored setting by keeping vision OFF: re-run with no_vision=True (CLI: "
+                    "--no-vision) or batch_size>0. Use force_reindex/--force only if you intend "
+                    "to rebuild the whole index with vision on."
+                )
             raise ConfigDriftError(
                 "Index configuration has changed since the last run (chunk size/overlap, embedding "
                 "provider/model/dimensions, OCR, or vision settings). Continuing would mix incompatible "
