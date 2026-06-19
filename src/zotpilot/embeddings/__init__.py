@@ -49,6 +49,7 @@ def create_embedder(config):
             model=config.embedding_model,
             base_url=base_url,
             timeout=config.embedding_timeout,
+            dimensions=config.embedding_dimensions,
         )
     elif config.embedding_provider == "none":
         logger.info("No-RAG mode: embedding disabled, semantic search unavailable")

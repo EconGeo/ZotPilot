@@ -79,7 +79,7 @@ class Indexer:
         )
         # Use factory to create appropriate embedder based on config
         self.embedder = create_embedder(config)
-        self.store = VectorStore(config.chroma_db_path, self.embedder)
+        self.store = VectorStore(config.chroma_db_path, self.embedder, collection_name=getattr(config, "collection_name", "chunks"))
         self.journal_ranker = JournalRanker()
         self._empty_docs_path = config.chroma_db_path / "empty_docs.json"
         self._config_hash_path = config.chroma_db_path / "config_hash.txt"

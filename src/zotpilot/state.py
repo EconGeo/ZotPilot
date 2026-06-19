@@ -240,7 +240,7 @@ def _get_retriever():
                 from .vector_store import VectorStore
 
                 embedder = create_embedder(_config)
-                _store = VectorStore(_config.chroma_db_path, embedder)
+                _store = VectorStore(_config.chroma_db_path, embedder, collection_name=_config.collection_name)
                 _retriever = Retriever(_store)
                 _reranker = Reranker(alpha=_config.rerank_alpha)
     return _retriever

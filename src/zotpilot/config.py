@@ -107,6 +107,8 @@ class Config:
     semantic_scholar_api_key: str | None
     # Ollama base URL (only used when embedding_provider="ollama")
     ollama_base_url: str = "http://localhost:11434"
+    # ChromaDB collection name — set to a different name to run a second index alongside the default "chunks"
+    collection_name: str = "chunks"
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -139,7 +141,7 @@ class Config:
             "gemini": ("gemini-embedding-001", 768),
             "dashscope": ("text-embedding-v4", 1024),
             "local": ("all-MiniLM-L6-v2", 384),
-            "ollama": ("nomic-embed-text", 768),
+            "ollama": ("bge-large", 1024),
             "none": ("none", 0),
         }
         default_model, default_dims = model_defaults.get(provider, ("gemini-embedding-001", 768))
@@ -191,6 +193,7 @@ class Config:
             zotero_user_id=data.get("zotero_user_id"),
             zotero_library_type=data.get("zotero_library_type", "user"),
             semantic_scholar_api_key=data.get("semantic_scholar_api_key"),
+            collection_name=data.get("collection_name", "chunks"),
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -238,6 +241,7 @@ class Config:
             "zotero_user_id": self.zotero_user_id,
             "zotero_library_type": self.zotero_library_type,
             "semantic_scholar_api_key": self.semantic_scholar_api_key,
+            "collection_name": self.collection_name,
         }
         data = {key: value for key, value in data.items() if value is not None}
 

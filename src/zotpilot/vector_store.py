@@ -84,8 +84,9 @@ class VectorStore:
     - Document-level operations (delete, list)
     """
 
-    def __init__(self, db_path: Path, embedder: EmbedderProtocol):
+    def __init__(self, db_path: Path, embedder: EmbedderProtocol, collection_name: str = "chunks"):
         self.db_path = Path(db_path)
+        self.collection_name = collection_name
         if not _probe_chroma_db_access(self.db_path):
             backup = _quarantine_chroma_db(self.db_path)
             logger.warning(
@@ -109,7 +110,7 @@ class VectorStore:
 
         # Check if collection exists and has data
         try:
-            existing = self.client.get_collection("chunks")
+            existing = self.client.get_collection(self.collection_name)
             # Do not call collection.count() during startup. In the current
             # Chroma/Rust stack that path can segfault on some existing local
             # indexes; reading collection metadata is enough to validate the
@@ -118,7 +119,7 @@ class VectorStore:
                 stored_dims = (existing.metadata or {}).get("embedding_dimensions")
                 if stored_dims is not None and stored_dims != embedder_dims:
                     raise EmbeddingDimensionMismatchError(
-                        f"Embedding dimension mismatch: index has {stored_dims} dimensions "
+                        f"Embedding dimension mismatch: collection '{self.collection_name}' has {stored_dims} dimensions "
                         f"but current embedder uses {embedder_dims} dimensions. "
                         f"Delete the index and reindex with --force, or switch back to "
                         f"the original embedding provider.\n"
@@ -134,7 +135,7 @@ class VectorStore:
             metadata["embedding_dimensions"] = embedder_dims
 
         self.collection = self.client.get_or_create_collection(
-            name="chunks",
+            name=self.collection_name,
             metadata=metadata
         )
         self.embedder = embedder
