@@ -179,3 +179,43 @@ def test_index_all_libraries_batch_exhaustion_skips_unvisited_library(tmp_path, 
     assert result["has_more"] is True
     # Verify the aggregated count from library 1 only.
     assert result["indexed"] == 2
+
+
+from zotpilot.index_authority import reconcile_orphaned_index_docs
+
+
+class _FakeStore:
+    def __init__(self, doc_ids):
+        self._ids = set(doc_ids)
+        self.deleted = []
+
+    def get_indexed_doc_ids(self):
+        return set(self._ids)
+
+    def delete_document(self, doc_id):
+        self.deleted.append(doc_id)
+        self._ids.discard(doc_id)
+
+
+def test_reconcile_with_union_keeps_other_library_docs():
+    # Store holds docs from library A (USERAAAA) and library B (GRPBBBBB).
+    store = _FakeStore({"USERAAAA", "GRPBBBBB"})
+    union = {"USERAAAA", "GRPBBBBB"}  # global union -> nothing is orphaned
+
+    result = reconcile_orphaned_index_docs(store, union)
+
+    assert result["deleted_count"] == 0
+    assert store.deleted == []
+    assert store.get_indexed_doc_ids() == {"USERAAAA", "GRPBBBBB"}
+
+
+def test_reconcile_without_union_would_delete_other_library_docs():
+    # Demonstrates the ORIGINAL bug: reconciling against only library A's docs
+    # deletes library B's doc. This documents why the union is required.
+    store = _FakeStore({"USERAAAA", "GRPBBBBB"})
+    only_library_a = {"USERAAAA"}
+
+    result = reconcile_orphaned_index_docs(store, only_library_a)
+
+    assert "GRPBBBBB" in result["orphaned_doc_ids"]
+    assert store.deleted == ["GRPBBBBB"]
