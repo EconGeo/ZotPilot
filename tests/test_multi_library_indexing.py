@@ -219,3 +219,23 @@ def test_reconcile_without_union_would_delete_other_library_docs():
 
     assert "GRPBBBBB" in result["orphaned_doc_ids"]
     assert store.deleted == ["GRPBBBBB"]
+
+
+import zotpilot.tools.indexing as indexing_mod
+
+
+def test_collect_unindexed_papers_spans_all_libraries(tmp_path, monkeypatch):
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+
+    # Store already has the user-library doc indexed; group doc is not.
+    store = _FakeStore({"USERAAAA"})
+    monkeypatch.setattr(indexing_mod, "_get_config", lambda: cfg)
+    monkeypatch.setattr(indexing_mod, "_get_store", lambda: store)
+
+    papers, total = indexing_mod._collect_unindexed_papers()
+
+    doc_ids = {p["doc_id"] for p in papers}
+    assert "GRPBBBBB" in doc_ids       # group-library unindexed item is surfaced
+    assert "USERAAAA" not in doc_ids   # already-indexed user item excluded
+    assert total == 1
