@@ -84,3 +84,55 @@ def test_global_pdf_doc_ids_unions_all_libraries(tmp_path):
     data_dir = _make_db(tmp_path)
     ids = global_pdf_doc_ids(_Cfg(zotero_data_dir=data_dir))
     assert ids == {"USERAAAA", "GRPBBBBB"}
+
+
+from zotpilot.indexer import index_all_libraries
+
+
+class _FakeIndexer:
+    """Stand-in for Indexer that records protected_doc_ids and never touches Chroma."""
+    instances = []
+
+    def __init__(self, config, library_id=None):
+        self.library_id = library_id if library_id is not None else 1
+        self.captured = None
+        _FakeIndexer.instances.append(self)
+
+    def index_all(self, **kwargs):
+        self.captured = kwargs
+        # Library 1 indexes 1 doc with more pending; group library is fully done.
+        if self.library_id == 1:
+            return {"results": ["r1"], "indexed": 1, "failed": 0, "empty": 0,
+                    "skipped": 0, "already_indexed": 0, "has_more": True,
+                    "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+        return {"results": ["r2"], "indexed": 1, "failed": 0, "empty": 0,
+                "skipped": 0, "already_indexed": 5, "has_more": False,
+                "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+
+
+def test_index_all_libraries_protects_global_union(tmp_path, monkeypatch):
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _FakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _FakeIndexer)
+
+    result = index_all_libraries(cfg, batch_size=None)
+
+    # Every per-library call must receive the FULL union as protected_doc_ids.
+    for inst in _FakeIndexer.instances:
+        assert inst.captured["protected_doc_ids"] == {"USERAAAA", "GRPBBBBB"}
+    # Aggregated counts sum across libraries.
+    assert result["indexed"] == 2
+    assert result["already_indexed"] == 5
+    assert result["results"] == ["r1", "r2"]
+
+
+def test_index_all_libraries_batch_reports_aggregate_has_more(tmp_path, monkeypatch):
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _FakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _FakeIndexer)
+
+    # Library 1 (first) reports has_more=True -> aggregate must be True.
+    result = index_all_libraries(cfg, batch_size=2)
+    assert result["has_more"] is True

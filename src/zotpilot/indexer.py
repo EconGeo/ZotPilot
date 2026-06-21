@@ -92,6 +92,74 @@ def global_pdf_doc_ids(config) -> set[str]:
     return ids
 
 
+def index_all_libraries(
+    config,
+    *,
+    force_reindex: bool = False,
+    limit: int | None = None,
+    item_key: str | None = None,
+    item_keys: list[str] | None = None,
+    title_pattern: str | None = None,
+    max_pages: int = 0,
+    batch_size: int | None = None,
+    journal=None,
+) -> dict:
+    """Index every Zotero library (user + groups), protecting all libraries' docs.
+
+    Passes the full cross-library PDF doc-id union as ``protected_doc_ids`` to each
+    per-library ``Indexer.index_all`` so reconciliation only removes docs absent
+    from every library. Threads ``batch_size`` as a budget across libraries.
+    """
+    union = global_pdf_doc_ids(config)
+    libraries = enumerate_indexable_libraries(config)
+
+    agg_results: list = []
+    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0,
+              "already_indexed": 0, "skipped_long": 0}
+    long_documents: list = []
+    skipped_no_pdf: list = []
+    has_more = False
+    budget = batch_size  # None => unlimited per library
+
+    for lib_id, _label in libraries:
+        if budget is not None and budget <= 0:
+            has_more = True  # ran out before visiting this library
+            break
+
+        res = Indexer(config, library_id=lib_id).index_all(
+            force_reindex=force_reindex,
+            limit=limit,
+            item_key=item_key,
+            item_keys=item_keys,
+            title_pattern=title_pattern,
+            max_pages=max_pages,
+            batch_size=budget,
+            journal=journal,
+            protected_doc_ids=union,
+        )
+
+        agg_results.extend(res.get("results", []))
+        for k in summed:
+            summed[k] += res.get(k, 0)
+        long_documents.extend(res.get("long_documents", []))
+        skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
+
+        if batch_size is not None and res.get("has_more"):
+            has_more = True
+            break  # this library filled the batch; resume here on next call
+        elif batch_size is None and res.get("has_more"):
+            has_more = True  # aggregate but continue full sweep
+
+        if budget is not None:
+            budget -= res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
+
+    out = {"results": agg_results, "has_more": has_more}
+    out.update(summed)
+    out["long_documents"] = long_documents
+    out["skipped_no_pdf"] = skipped_no_pdf
+    return out
+
+
 class Indexer:
     """
     Orchestrates the full indexing pipeline.
