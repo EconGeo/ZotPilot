@@ -144,14 +144,16 @@ def index_all_libraries(
         long_documents.extend(res.get("long_documents", []))
         skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
 
-        if batch_size is not None and res.get("has_more"):
-            has_more = True
-            break  # this library filled the batch; resume here on next call
-        elif batch_size is None and res.get("has_more"):
-            has_more = True  # aggregate but continue full sweep
-
+        progress = res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
         if budget is not None:
-            budget -= res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
+            budget -= progress
+
+        if batch_size is not None and res.get("has_more") and progress > 0:
+            has_more = True
+            break  # real work done and more remains -> resume here next call
+        elif batch_size is None and res.get("has_more"):
+            has_more = True  # full sweep: aggregate but keep going
+        # batched + has_more + zero progress -> fall through to next library
 
     out = {"results": agg_results, "has_more": has_more}
     out.update(summed)

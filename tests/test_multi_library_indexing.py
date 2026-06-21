@@ -181,6 +181,42 @@ def test_index_all_libraries_batch_exhaustion_skips_unvisited_library(tmp_path, 
     assert result["indexed"] == 2
 
 
+def test_index_all_libraries_does_not_stall_on_fully_indexed_first_library(tmp_path, monkeypatch):
+    """A fully-indexed lib1 (has_more=True, indexed=0) must NOT starve lib2."""
+
+    class _StallFakeIndexer:
+        instances = []
+
+        def __init__(self, config, library_id=None):
+            self.library_id = library_id if library_id is not None else 1
+            self.captured = None
+            _StallFakeIndexer.instances.append(self)
+
+        def index_all(self, **kwargs):
+            self.captured = kwargs
+            if self.library_id == 1:
+                # Already fully indexed: has_more=True but zero new work done.
+                return {"results": [], "indexed": 0, "failed": 0, "empty": 0,
+                        "skipped": 0, "already_indexed": 50, "has_more": True,
+                        "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+            # Group library: has real work.
+            return {"results": ["r2"], "indexed": 1, "failed": 0, "empty": 0,
+                    "skipped": 0, "already_indexed": 0, "has_more": False,
+                    "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _StallFakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _StallFakeIndexer)
+
+    result = index_all_libraries(cfg, batch_size=5)
+
+    # Both libraries must have been visited — lib1 must NOT starve lib2.
+    assert len(_StallFakeIndexer.instances) == 2
+    # Only lib2's work counts (lib1 made no progress).
+    assert result["indexed"] == 1
+
+
 from zotpilot.index_authority import reconcile_orphaned_index_docs
 
 
