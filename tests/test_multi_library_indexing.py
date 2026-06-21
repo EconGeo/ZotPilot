@@ -136,3 +136,46 @@ def test_index_all_libraries_batch_reports_aggregate_has_more(tmp_path, monkeypa
     # Library 1 (first) reports has_more=True -> aggregate must be True.
     result = index_all_libraries(cfg, batch_size=2)
     assert result["has_more"] is True
+
+
+def test_index_all_libraries_batch_exhaustion_skips_unvisited_library(tmp_path, monkeypatch):
+    """Test that budget depletion at loop top skips unvisited libraries and sets has_more=True."""
+
+    class _BudgetFakeIndexer:
+        """Fake indexer that reports has_more=False with indexed count == batch_size."""
+        instances = []
+
+        def __init__(self, config, library_id=None):
+            self.library_id = library_id if library_id is not None else 1
+            self.captured = None
+            _BudgetFakeIndexer.instances.append(self)
+
+        def index_all(self, **kwargs):
+            self.captured = kwargs
+            # Library 1 indexes exactly batch_size (2) docs with no more pending.
+            # This depletes budget to 0, so library 2 is never visited.
+            if self.library_id == 1:
+                return {"results": ["r1", "r2"], "indexed": 2, "failed": 0, "empty": 0,
+                        "skipped": 0, "already_indexed": 0, "has_more": False,
+                        "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+            # Library 2 should never be reached, but return a default just in case.
+            return {"results": ["r3"], "indexed": 1, "failed": 0, "empty": 0,
+                    "skipped": 0, "already_indexed": 0, "has_more": False,
+                    "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _BudgetFakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _BudgetFakeIndexer)
+
+    # batch_size=2; library 1 indexes exactly 2 docs with has_more=False.
+    # This exhausts budget to 0, triggering the `budget <= 0` check at loop top
+    # before library 2 is visited.
+    result = index_all_libraries(cfg, batch_size=2)
+
+    # Only library 1 should have been instantiated.
+    assert len(_BudgetFakeIndexer.instances) == 1
+    # Budget exhaustion must set has_more=True (aggregated).
+    assert result["has_more"] is True
+    # Verify the aggregated count from library 1 only.
+    assert result["indexed"] == 2
