@@ -352,8 +352,9 @@ def cmd_index(args):
     except Exception:
         pass
 
-    indexer = Indexer(config)
-    result = indexer.index_all(
+    from .indexer import index_all_libraries
+    result = index_all_libraries(
+        config,
         force_reindex=args.force,
         limit=args.limit,
         item_key=args.item_key,
