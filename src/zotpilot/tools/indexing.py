@@ -253,8 +253,9 @@ def index_library(
 
         effective_max_pages = max_pages if max_pages is not None else config.max_pages
 
-        indexer = Indexer(config)
-        result = indexer.index_all(
+        from ..indexer import index_all_libraries
+        result = index_all_libraries(
+            config,
             force_reindex=force_reindex,
             limit=limit,
             item_key=item_key,
