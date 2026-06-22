@@ -114,19 +114,23 @@ def index_all_libraries(
     libraries = enumerate_indexable_libraries(config)
 
     agg_results: list = []
-    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0,
-              "already_indexed": 0, "skipped_long": 0}
+    # already_indexed is computed once after the loop from the store; don't sum it.
+    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "skipped_long": 0}
+    agg_quality_distribution: dict[str, int] = {}
+    agg_extraction_stats: dict[str, int] = {}
     long_documents: list = []
     skipped_no_pdf: list = []
     has_more = False
     budget = batch_size  # None => unlimited per library
+    last_idxr: object = None
 
     for lib_id, _label in libraries:
         if budget is not None and budget <= 0:
             has_more = True  # ran out before visiting this library
             break
 
-        res = Indexer(config, library_id=lib_id).index_all(
+        idxr = Indexer(config, library_id=lib_id)
+        res = idxr.index_all(
             force_reindex=force_reindex,
             limit=limit,
             item_key=item_key,
@@ -137,12 +141,21 @@ def index_all_libraries(
             journal=journal,
             protected_doc_ids=union,
         )
+        last_idxr = idxr
 
         agg_results.extend(res.get("results", []))
         for k in summed:
             summed[k] += res.get(k, 0)
         long_documents.extend(res.get("long_documents", []))
         skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
+
+        # Aggregate quality_distribution (grade -> count) across libraries.
+        for grade, count in res.get("quality_distribution", {}).items():
+            agg_quality_distribution[grade] = agg_quality_distribution.get(grade, 0) + count
+
+        # Aggregate extraction_stats (counter -> count) across libraries.
+        for stat, count in res.get("extraction_stats", {}).items():
+            agg_extraction_stats[stat] = agg_extraction_stats.get(stat, 0) + count
 
         progress = res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
         if budget is not None:
@@ -155,10 +168,25 @@ def index_all_libraries(
             has_more = True  # full sweep: aggregate but keep going
         # batched + has_more + zero progress -> fall through to next library
 
+    # Compute already_indexed as the distinct count of docs present in BOTH the
+    # cross-library union and the vector store — not the sum of per-library counts.
+    if last_idxr is not None:
+        _store = getattr(last_idxr, "store", None)
+        if _store is not None:
+            store_ids = _store.get_indexed_doc_ids()
+            already_indexed = len(store_ids & union)
+        else:
+            already_indexed = 0
+    else:
+        already_indexed = 0
+
     out = {"results": agg_results, "has_more": has_more}
     out.update(summed)
+    out["already_indexed"] = already_indexed
     out["long_documents"] = long_documents
     out["skipped_no_pdf"] = skipped_no_pdf
+    out["quality_distribution"] = agg_quality_distribution
+    out["extraction_stats"] = agg_extraction_stats
     return out
 
 
@@ -359,7 +387,7 @@ class Indexer:
             in_progress_first = set(journal.in_progress.keys())
             items = sorted(items, key=lambda item: (item.item_key not in in_progress_first, item.item_key))
 
-        if limit:
+        if limit is not None:
             items = items[:limit]
             logger.info(f"Limit applied: processing at most {limit} papers")
 
