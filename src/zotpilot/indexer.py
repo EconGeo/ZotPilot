@@ -483,6 +483,10 @@ class Indexer:
             "empty_pages": 0,
         }
 
+        if to_index:
+            from .embeddings.preflight import check_embedder
+            check_embedder(self.embedder)
+
         # ---- Phase 1: Extract all documents (vision specs collected but deferred) ----
         figures_dir = self.config.chroma_db_path.parent / "figures"
         doc_extractions: dict[str, tuple[ZoteroItem, object]] = {}  # item_key -> (item, extraction)
