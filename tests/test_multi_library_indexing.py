@@ -89,6 +89,15 @@ def test_global_pdf_doc_ids_unions_all_libraries(tmp_path):
 from zotpilot.indexer import index_all_libraries
 
 
+class _FakeIndexerStore:
+    """Minimal store fake for _FakeIndexer: reports a fixed set of indexed doc IDs."""
+    def __init__(self, doc_ids=()):
+        self._ids = set(doc_ids)
+
+    def get_indexed_doc_ids(self):
+        return set(self._ids)
+
+
 class _FakeIndexer:
     """Stand-in for Indexer that records protected_doc_ids and never touches Chroma."""
     instances = []
@@ -96,6 +105,9 @@ class _FakeIndexer:
     def __init__(self, config, library_id=None):
         self.library_id = library_id if library_id is not None else 1
         self.captured = None
+        # Expose a store so index_all_libraries can call store.get_indexed_doc_ids().
+        # Report both union items as already indexed in the shared store.
+        self.store = _FakeIndexerStore({"USERAAAA", "GRPBBBBB"})
         _FakeIndexer.instances.append(self)
 
     def index_all(self, **kwargs):
@@ -103,11 +115,17 @@ class _FakeIndexer:
         # Library 1 indexes 1 doc with more pending; group library is fully done.
         if self.library_id == 1:
             return {"results": ["r1"], "indexed": 1, "failed": 0, "empty": 0,
-                    "skipped": 0, "already_indexed": 0, "has_more": True,
-                    "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+                    "skipped": 0, "already_indexed": 5, "has_more": True,
+                    "skipped_long": 0, "long_documents": [], "skipped_no_pdf": [],
+                    "quality_distribution": {"A": 1, "B": 0, "C": 0, "D": 0, "F": 0},
+                    "extraction_stats": {"total_pages": 10, "text_pages": 8,
+                                        "ocr_pages": 2, "empty_pages": 0}}
         return {"results": ["r2"], "indexed": 1, "failed": 0, "empty": 0,
                 "skipped": 0, "already_indexed": 5, "has_more": False,
-                "skipped_long": 0, "long_documents": [], "skipped_no_pdf": []}
+                "skipped_long": 0, "long_documents": [], "skipped_no_pdf": [],
+                "quality_distribution": {"A": 0, "B": 1, "C": 0, "D": 0, "F": 0},
+                "extraction_stats": {"total_pages": 20, "text_pages": 18,
+                                     "ocr_pages": 1, "empty_pages": 1}}
 
 
 def test_index_all_libraries_protects_global_union(tmp_path, monkeypatch):
@@ -123,7 +141,9 @@ def test_index_all_libraries_protects_global_union(tmp_path, monkeypatch):
         assert inst.captured["protected_doc_ids"] == {"USERAAAA", "GRPBBBBB"}
     # Aggregated counts sum across libraries.
     assert result["indexed"] == 2
-    assert result["already_indexed"] == 5
+    # already_indexed is the distinct count from the store × union — NOT the sum of
+    # per-library already_indexed values (which would be 10 with two fakes each reporting 5).
+    assert result["already_indexed"] == 2  # |{"USERAAAA","GRPBBBBB"} & {"USERAAAA","GRPBBBBB"}|
     assert result["results"] == ["r1", "r2"]
 
 
@@ -275,3 +295,56 @@ def test_collect_unindexed_papers_spans_all_libraries(tmp_path, monkeypatch):
     assert "GRPBBBBB" in doc_ids       # group-library unindexed item is surfaced
     assert "USERAAAA" not in doc_ids   # already-indexed user item excluded
     assert total == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4: --limit 0 and aggregate summary fixes
+# ---------------------------------------------------------------------------
+
+def test_limit_zero_indexes_nothing(tmp_path, monkeypatch):
+    """limit=0 must be passed through to index_all as 0, not coerced to None."""
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _FakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _FakeIndexer)
+    index_all_libraries(cfg, limit=0)
+    for inst in _FakeIndexer.instances:
+        assert inst.captured["limit"] == 0, (
+            f"library {inst.library_id}: expected limit=0, got {inst.captured['limit']!r}"
+        )
+
+
+def test_aggregate_already_indexed_is_distinct_not_summed(tmp_path, monkeypatch):
+    """already_indexed must be the distinct store×union count, not the per-library sum.
+
+    _FakeIndexer reports already_indexed=5 from each of the 2 libraries.
+    A naive sum would give 10, which is wrong. The correct value is
+    len(global_pdf_doc_ids(cfg) & store.get_indexed_doc_ids()) ≤ 5.
+    """
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _FakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _FakeIndexer)
+    result = index_all_libraries(cfg, batch_size=None)
+    assert result["already_indexed"] <= 5, (
+        f"already_indexed={result['already_indexed']} looks like a naive sum of per-library values"
+    )
+    assert result["already_indexed"] != 10, "already_indexed must not be the naive sum (10)"
+
+
+def test_quality_distribution_and_extraction_stats_are_aggregated(tmp_path, monkeypatch):
+    """quality_distribution and extraction_stats must be summed across libraries."""
+    data_dir = _make_db(tmp_path)
+    cfg = _Cfg(zotero_data_dir=data_dir)
+    _FakeIndexer.instances = []
+    monkeypatch.setattr("zotpilot.indexer.Indexer", _FakeIndexer)
+    result = index_all_libraries(cfg, batch_size=None)
+    # _FakeIndexer lib1 returns quality A=1, lib2 returns quality B=1 — sum is A=1, B=1.
+    qd = result.get("quality_distribution")
+    assert qd is not None, "quality_distribution missing from aggregate result"
+    assert qd.get("A", 0) == 1
+    assert qd.get("B", 0) == 1
+    # extraction_stats: lib1 total_pages=10, lib2 total_pages=20 -> sum=30
+    es = result.get("extraction_stats")
+    assert es is not None, "extraction_stats missing from aggregate result"
+    assert es.get("total_pages", 0) == 30

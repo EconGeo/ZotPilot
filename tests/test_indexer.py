@@ -27,6 +27,52 @@ class TestConfigHash:
 
         assert _config_hash(base) != _config_hash(native)
 
+    def test_config_hash_changes_with_chunker_backend(self):
+        from zotpilot.indexer import _config_hash
+
+        base_attrs = dict(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="gemini",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=768,
+            embedding_model="gemini-embedding-001",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+            chunker_backend="char",
+        )
+        cfg_char = SimpleNamespace(**base_attrs)
+        cfg_li = SimpleNamespace(**{**base_attrs, "chunker_backend": "llamaindex"})
+        assert _config_hash(cfg_char) != _config_hash(cfg_li)
+
+    def test_config_hash_char_equals_no_attr(self):
+        """Existing users (no chunker_backend attr) must get the same hash as
+        explicit ``chunker_backend="char"``. This locks the guarantee that upgrading
+        ZotPilot does not produce a spurious "config changed" warning for default
+        char users."""
+        from zotpilot.indexer import _config_hash
+
+        shared = dict(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="gemini",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=768,
+            embedding_model="gemini-embedding-001",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+        )
+        # cfg_no_attr intentionally has no chunker_backend attribute at all
+        cfg_no_attr = SimpleNamespace(**shared)
+        cfg_char = SimpleNamespace(**shared, chunker_backend="char")
+        assert _config_hash(cfg_no_attr) == _config_hash(cfg_char), (
+            "char users must not get a spurious hash mismatch after upgrade"
+        )
+
 
 class TestTitlePatternValidation:
     """Test P0-3: ReDoS protection on title_pattern in Indexer.index_all()."""
@@ -464,3 +510,96 @@ class TestVisionBudgetGuards:
         assert "table cap 1" in result["vision_skip_reason"]
         mock_finalize.assert_called_once_with(extraction)
         mock_resolve.assert_not_called()
+
+
+class TestLimitSemantics:
+    """Task 4: limit=0 means 'index nothing'; limit=None means 'no limit'."""
+
+    def _make_indexer(self):
+        try:
+            from zotpilot.indexer import Indexer
+        except (ImportError, ModuleNotFoundError):
+            pytest.skip("Indexer dependencies not fully available")
+
+        config = MagicMock()
+        config.zotero_data_dir = Path("/fake")
+        config.chroma_db_path = Path("/fake/chroma")
+        config.chunk_size = 1000
+        config.chunk_overlap = 200
+        config.embedding_provider = "local"
+        config.embedding_dimensions = 384
+        config.embedding_model = "test"
+        config.ocr_language = "eng"
+        config.vision_enabled = False
+        config.anthropic_api_key = None
+        config.max_pages = 0
+        config.vision_max_tables_per_run = None
+        config.vision_max_cost_usd = None
+        config.oversample_multiplier = 2
+
+        with patch("zotpilot.indexer.ZoteroClient"), \
+             patch("zotpilot.indexer.create_embedder"), \
+             patch("zotpilot.indexer.VectorStore"), \
+             patch("zotpilot.indexer.JournalRanker"):
+            indexer = Indexer(config)
+        return indexer
+
+    def _make_item(self, key, title="Test Paper"):
+        item = MagicMock()
+        item.item_key = key
+        item.title = title
+        pdf = MagicMock()
+        pdf.exists.return_value = True
+        pdf.__str__ = lambda self: f"/fake/{key}.pdf"
+        item.pdf_path = pdf
+        return item
+
+    def _patch_indexer(self, indexer):
+        indexer._load_empty_docs = MagicMock(return_value={})
+        indexer._save_empty_docs = MagicMock()
+        indexer._config_hash_path = MagicMock()
+        indexer._config_hash_path.exists.return_value = False
+        indexer._config_hash_path.write_text = MagicMock()
+
+    def test_limit_zero_indexes_nothing(self):
+        """index_all(limit=0) must index 0 items — 0 is a valid limit, not 'no limit'."""
+        from unittest.mock import MagicMock, patch
+
+        items = [self._make_item(f"K{i}") for i in range(3)]
+        indexer = self._make_indexer()
+        self._patch_indexer(indexer)
+        indexer.zotero.get_all_items_with_pdfs.return_value = items
+        indexer.store.get_indexed_doc_ids.return_value = set()
+
+        with patch("zotpilot.indexer.extract_document") as mock_extract, \
+             patch.object(indexer, "_index_extraction") as mock_index:
+            result = indexer.index_all(limit=0)
+
+        assert result["indexed"] == 0, (
+            f"limit=0 should prevent indexing any items, got indexed={result['indexed']}"
+        )
+        mock_extract.assert_not_called()
+
+    def test_limit_none_processes_all(self):
+        """index_all(limit=None) must process all available items."""
+        from unittest.mock import MagicMock, patch
+
+        items = [self._make_item(f"K{i}") for i in range(3)]
+        indexer = self._make_indexer()
+        self._patch_indexer(indexer)
+        indexer.zotero.get_all_items_with_pdfs.return_value = items
+        indexer.store.get_indexed_doc_ids.return_value = set()
+
+        mock_extraction = MagicMock()
+        mock_extraction.pages = [MagicMock()]
+        mock_extraction.stats = {"total_pages": 1, "text_pages": 1, "ocr_pages": 0, "empty_pages": 0}
+        mock_extraction.quality_grade = "A"
+        mock_extraction.pending_vision = None
+
+        with patch("zotpilot.indexer.extract_document", return_value=mock_extraction), \
+             patch.object(indexer, "_index_extraction", return_value=(1, 0, "", {}, "A")):
+            result = indexer.index_all(limit=None)
+
+        assert result["indexed"] == 3, (
+            f"limit=None should process all 3 items, got indexed={result['indexed']}"
+        )

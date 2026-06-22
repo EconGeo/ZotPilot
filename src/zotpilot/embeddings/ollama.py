@@ -3,6 +3,8 @@ import logging
 
 import httpx
 
+from .base import truncate_to_token_budget
+
 logger = logging.getLogger(__name__)
 
 OLLAMA_DEFAULT_URL = "http://localhost:11434"
@@ -29,17 +31,24 @@ class OllamaEmbedder:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.dimensions = dimensions
+        self.max_input_tokens = 512
+        self.embed_batch_size = 16
 
     def embed(self, texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
         if not texts:
             return []
-        resp = httpx.post(
-            f"{self.base_url}/api/embed",
-            json={"model": self.model, "input": texts},
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()["embeddings"]
+        safe = [truncate_to_token_budget(t, self.max_input_tokens) for t in texts]
+        out: list[list[float]] = []
+        for i in range(0, len(safe), self.embed_batch_size):
+            batch = safe[i : i + self.embed_batch_size]
+            resp = httpx.post(
+                f"{self.base_url}/api/embed",
+                json={"model": self.model, "input": batch},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            out.extend(resp.json()["embeddings"])
+        return out
 
     def embed_query(self, query: str) -> list[float]:
         if "bge" in self.model.lower():

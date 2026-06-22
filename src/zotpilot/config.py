@@ -109,6 +109,8 @@ class Config:
     ollama_base_url: str = "http://localhost:11434"
     # ChromaDB collection name — set to a different name to run a second index alongside the default "chunks"
     collection_name: str = "chunks"
+    # Chunker backend: "char" (default, character-based) or "llamaindex" (sentence-aware)
+    chunker_backend: str = "char"
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -158,6 +160,15 @@ class Config:
         elif vision_provider == "anthropic" and vision_model == DASHSCOPE_DEFAULT_VISION_MODEL:
             vision_model = ANTHROPIC_DEFAULT_VISION_MODEL
 
+        # Validate chunker_backend before constructing
+        chunker_backend = data.get("chunker_backend", "char")
+        _valid_chunker_backends = {"char", "llamaindex"}
+        if chunker_backend not in _valid_chunker_backends:
+            raise ValueError(
+                f"Invalid chunker_backend {chunker_backend!r}. "
+                f"Must be one of {sorted(_valid_chunker_backends)}."
+            )
+
         return cls(
             zotero_data_dir=Path(data.get("zotero_data_dir", "~/Zotero")).expanduser(),
             chroma_db_path=Path(data.get("chroma_db_path", default_chroma)).expanduser(),
@@ -194,6 +205,7 @@ class Config:
             zotero_library_type=data.get("zotero_library_type", "user"),
             semantic_scholar_api_key=data.get("semantic_scholar_api_key"),
             collection_name=data.get("collection_name", "chunks"),
+            chunker_backend=chunker_backend,
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -242,6 +254,7 @@ class Config:
             "zotero_library_type": self.zotero_library_type,
             "semantic_scholar_api_key": self.semantic_scholar_api_key,
             "collection_name": self.collection_name,
+            "chunker_backend": self.chunker_backend,
         }
         data = {key: value for key, value in data.items() if value is not None}
 

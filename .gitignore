@@ -26,6 +26,9 @@ data/
 docs/*
 !docs/e2e-scenarios/
 !docs/e2e-scenarios/**
+!docs/superpowers/
+!docs/superpowers/**
+!docs/chunker-backends.md
 docs/test-runs/
 
 # Playwright MCP logs
@@ -66,3 +69,6 @@ MagicMock/
 
 # Connector browser-extension build artifacts (distributed via GitHub Release)
 zotpilot-connector-*.zip
+
+# local exploration / bakeoff scratch (not for the repo)
+explorations/
