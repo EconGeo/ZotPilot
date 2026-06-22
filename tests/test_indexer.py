@@ -27,6 +27,26 @@ class TestConfigHash:
 
         assert _config_hash(base) != _config_hash(native)
 
+    def test_config_hash_changes_with_chunker_backend(self):
+        from zotpilot.indexer import _config_hash
+
+        base_attrs = dict(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="gemini",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=768,
+            embedding_model="gemini-embedding-001",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+            chunker_backend="char",
+        )
+        cfg_char = SimpleNamespace(**base_attrs)
+        cfg_li = SimpleNamespace(**{**base_attrs, "chunker_backend": "llamaindex"})
+        assert _config_hash(cfg_char) != _config_hash(cfg_li)
+
 
 class TestTitlePatternValidation:
     """Test P0-3: ReDoS protection on title_pattern in Indexer.index_all()."""

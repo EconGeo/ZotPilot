@@ -44,7 +44,8 @@ def _config_hash(config: Config) -> str:
         f"{config.ocr_language}:"
         f"{getattr(config, 'vision_enabled', True)}:"
         f"{getattr(config, 'vision_provider', 'anthropic')}:"
-        f"{getattr(config, 'vision_model', '')}"
+        f"{getattr(config, 'vision_model', '')}:"
+        f"{getattr(config, 'chunker_backend', 'char')}"
     )
     return hashlib.sha256(data.encode()).hexdigest()[:16]
 
@@ -202,10 +203,14 @@ class Indexer:
         _lib_id = library_id if library_id is not None else 1
         self.zotero = ZoteroClient(config.zotero_data_dir, library_id=_lib_id)
 
-        self.chunker = Chunker(
-            chunk_size=config.chunk_size,
-            overlap=config.chunk_overlap,
-        )
+        backend = getattr(config, "chunker_backend", "char")
+        if backend == "llamaindex":
+            from .pdf.llamaindex_chunker import LlamaIndexChunker
+            self.chunker = LlamaIndexChunker(
+                chunk_size=config.chunk_size, overlap=config.chunk_overlap
+            )
+        else:
+            self.chunker = Chunker(chunk_size=config.chunk_size, overlap=config.chunk_overlap)
         # Use factory to create appropriate embedder based on config
         self.embedder = create_embedder(config)
         self.store = VectorStore(config.chroma_db_path, self.embedder, collection_name=getattr(config, "collection_name", "chunks"))
