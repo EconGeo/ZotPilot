@@ -11,7 +11,7 @@ ZotPilot now supports swappable chunker backends, including a token-aware splitt
 Install the optional `llamaindex` dependency:
 
 ```bash
-pip install -e 'zotpilot[llamaindex]'
+pip install -e '.[llamaindex]'
 ```
 
 This adds the `SentenceSplitter` from `llama_index` (token-aware, using bge-large's tokenizer).
@@ -83,7 +83,7 @@ This release hardens the indexing pipeline with several fixes:
 
 ## Summary
 
-- Enable with `pip install zotpilot[llamaindex]` and `chunker_backend: "llamaindex"` in config.
+- Enable with `pip install -e '.[llamaindex]'` and `chunker_backend: "llamaindex"` in config.
 - Switch backends once, then run `zotpilot index --force` for a clean reindex.
 - Token-aware chunks respect the bge-large 512-token window (480-token target).
 - Existing reliability improvements reduce silent failures and improve error diagnostics.

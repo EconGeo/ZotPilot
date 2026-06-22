@@ -27,7 +27,7 @@ The token-aware chunker uses `llama_index.core.node_parser.SentenceSplitter` wit
 **Installation:**
 
 ```bash
-pip install -e 'zotpilot[llamaindex]'
+pip install -e '.[llamaindex]'
 ```
 
 **Token budget:**
@@ -81,14 +81,14 @@ EmbeddingError: Ollama service unreachable at http://localhost:11434
 
 When switching from `"char"` to `"llamaindex"`:
 
-1. Install the optional dependency: `pip install -e 'zotpilot[llamaindex]'`
+1. Install the optional dependency: `pip install -e '.[llamaindex]'`
 2. Update config: `chunker_backend: "llamaindex"`
 3. Re-index with `--force`:
    ```bash
    zotpilot index --force
    ```
 
-The `--force` flag triggers a full re-embedding because chunk boundaries have changed (character-based → token-aware). Without `--force`, the indexer skips re-embedding to save time if config accidentally reverts.
+The `--force` flag triggers a full re-embedding because chunk boundaries have changed (character-based → token-aware). Without `--force`, the indexer skips already-indexed documents (re-embedding only occurs with `--force` or for documents not yet in the index).
 
 **Note:** Mixed-backend collections (some docs indexed under `"char"`, others under `"llamaindex"`) are technically valid but not recommended due to inconsistent chunk boundaries and potential search quality variance.
 
@@ -113,7 +113,7 @@ chunker_backend: "llamaindex"  # Enable token-aware chunking
 
 Install the optional dependency:
 ```bash
-pip install -e 'zotpilot[llamaindex]'
+pip install -e '.[llamaindex]'
 ```
 
 ### `Config has changed. Run with --force to re-index...`
