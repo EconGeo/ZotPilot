@@ -26,15 +26,11 @@ class LlamaIndexChunker:
         self._tokenizer = Tokenizer.from_pretrained(model_tokenizer)
         self.hard_cap_tokens = hard_cap_tokens
 
-        def _token_len(text: str) -> int:
-            return len(self._tokenizer.encode(text).ids)
-
         self._splitter = SentenceSplitter(
             chunk_size=chunk_size,
             chunk_overlap=overlap,
             tokenizer=lambda t: self._tokenizer.encode(t).ids,
         )
-        self._token_len = _token_len
 
     def _truncate(self, text: str) -> str:
         ids = self._tokenizer.encode(text).ids
@@ -54,7 +50,7 @@ class LlamaIndexChunker:
         page_boundaries = [(p.char_start, p.page_num) for p in pages]
         chunks: list[Chunk] = []
         cursor = 0
-        for idx, piece in enumerate(self._splitter.split_text(full_text)):
+        for piece in self._splitter.split_text(full_text):
             piece = self._truncate(piece.strip())
             if not piece:
                 continue
@@ -77,7 +73,7 @@ class LlamaIndexChunker:
                 section, confidence = "references", 1.0
 
             chunks.append(Chunk(
-                text=piece, chunk_index=idx, page_num=page_num,
+                text=piece, chunk_index=len(chunks), page_num=page_num,
                 char_start=start, char_end=end,
                 section=section, section_confidence=confidence,
             ))

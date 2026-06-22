@@ -66,3 +66,6 @@ MagicMock/
 
 # Connector browser-extension build artifacts (distributed via GitHub Release)
 zotpilot-connector-*.zip
+
+# local exploration / bakeoff scratch (not for the repo)
+explorations/

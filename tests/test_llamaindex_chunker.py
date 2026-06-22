@@ -4,7 +4,6 @@ import pytest
 pytest.importorskip("llama_index.core")
 pytest.importorskip("tokenizers")
 
-from tokenizers import Tokenizer  # noqa: E402
 from zotpilot.pdf.llamaindex_chunker import LlamaIndexChunker  # noqa: E402
 
 
