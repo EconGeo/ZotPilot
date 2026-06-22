@@ -467,11 +467,10 @@ class TestContextAndIndexingContracts:
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
             patch("zotpilot.tools.indexing._get_store") as mock_store,
-            patch("zotpilot.indexer.Indexer") as mock_indexer_cls,
+            patch("zotpilot.indexer.index_all_libraries", return_value=index_result),
             patch("dataclasses.replace", side_effect=lambda obj, **kwargs: obj),
         ):
             mock_store.return_value.clear_query_cache = MagicMock()
-            mock_indexer_cls.return_value.index_all.return_value = index_result
             compact = index_library(batch_size=0)
             full = index_library(batch_size=0, include_summary=True)
 
@@ -495,19 +494,22 @@ class TestContextAndIndexingContracts:
         config.max_pages = 40
         config.vision_enabled = True
 
+        captured = {}
+
+        def fake_index_all_libraries(cfg, **kwargs):
+            captured.update(kwargs)
+            return index_result
+
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
             patch("zotpilot.tools.indexing._get_store") as mock_store,
-            patch("zotpilot.indexer.Indexer") as mock_indexer_cls,
+            patch("zotpilot.indexer.index_all_libraries", fake_index_all_libraries),
             patch("dataclasses.replace", side_effect=lambda obj, **kwargs: obj),
         ):
             mock_store.return_value.clear_query_cache = MagicMock()
-            mock_indexer = mock_indexer_cls.return_value
-            mock_indexer.index_all.return_value = index_result
-
             index_library(item_keys='["KBQCDWBE","54ZZF3LP"]', batch_size=0)
 
-        assert mock_indexer.index_all.call_args.kwargs["item_keys"] == ["KBQCDWBE", "54ZZF3LP"]
+        assert captured["item_keys"] == ["KBQCDWBE", "54ZZF3LP"]
 
 
     def test_index_library_exposes_vision_budget_summary_when_requested(self):
@@ -539,11 +541,10 @@ class TestContextAndIndexingContracts:
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
             patch("zotpilot.tools.indexing._get_store") as mock_store,
-            patch("zotpilot.indexer.Indexer") as mock_indexer_cls,
+            patch("zotpilot.indexer.index_all_libraries", return_value=index_result),
             patch("dataclasses.replace", side_effect=lambda obj, **kwargs: obj),
         ):
             mock_store.return_value.clear_query_cache = MagicMock()
-            mock_indexer_cls.return_value.index_all.return_value = index_result
             result = index_library(batch_size=0, include_summary=True)
 
         assert result["vision_pending_tables"] == 12

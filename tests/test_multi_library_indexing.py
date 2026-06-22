@@ -371,3 +371,19 @@ def test_reconcile_without_union_would_delete_other_library_docs():
 
     assert "BBB" in result["orphaned_doc_ids"]
     assert store.deleted == ["BBB"]
+
+
+def test_cli_and_mcp_call_index_all_libraries(monkeypatch):
+    import zotpilot.cli as cli
+    seen = {}
+    monkeypatch.setattr("zotpilot.indexer.index_all_libraries",
+                        lambda config, **k: seen.setdefault("called", k) or
+                        {"results": [], "indexed": 0, "failed": 0, "empty": 0,
+                         "skipped": 0, "already_indexed": 0, "skipped_no_pdf": [],
+                         "has_more": False})
+    # The CLI/MCP wiring imports index_all_libraries from .indexer; assert the
+    # symbol is referenced (smoke check that the call site was switched over).
+    import inspect
+    assert "index_all_libraries" in inspect.getsource(cli.cmd_index)
+    import zotpilot.tools.indexing as ti
+    assert "index_all_libraries" in inspect.getsource(ti.index_library)

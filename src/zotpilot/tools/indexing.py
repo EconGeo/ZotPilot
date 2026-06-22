@@ -276,8 +276,9 @@ def index_library(
         from ..vector_store import EmbeddingDimensionMismatchError, IndexUnavailableError
 
         try:
-            indexer = Indexer(config)
-            result = indexer.index_all(
+            from ..indexer import index_all_libraries
+            result = index_all_libraries(
+                config,
                 force_reindex=force_reindex,
                 limit=limit,
                 item_key=item_key,
