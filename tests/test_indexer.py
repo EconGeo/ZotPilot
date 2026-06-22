@@ -47,6 +47,32 @@ class TestConfigHash:
         cfg_li = SimpleNamespace(**{**base_attrs, "chunker_backend": "llamaindex"})
         assert _config_hash(cfg_char) != _config_hash(cfg_li)
 
+    def test_config_hash_char_equals_no_attr(self):
+        """Existing users (no chunker_backend attr) must get the same hash as
+        explicit ``chunker_backend="char"``. This locks the guarantee that upgrading
+        ZotPilot does not produce a spurious "config changed" warning for default
+        char users."""
+        from zotpilot.indexer import _config_hash
+
+        shared = dict(
+            chunk_size=400,
+            chunk_overlap=100,
+            embedding_provider="gemini",
+            dashscope_embedding_endpoint="compatible",
+            embedding_dimensions=768,
+            embedding_model="gemini-embedding-001",
+            ocr_language="eng",
+            vision_enabled=False,
+            vision_provider="anthropic",
+            vision_model="",
+        )
+        # cfg_no_attr intentionally has no chunker_backend attribute at all
+        cfg_no_attr = SimpleNamespace(**shared)
+        cfg_char = SimpleNamespace(**shared, chunker_backend="char")
+        assert _config_hash(cfg_no_attr) == _config_hash(cfg_char), (
+            "char users must not get a spurious hash mismatch after upgrade"
+        )
+
 
 class TestTitlePatternValidation:
     """Test P0-3: ReDoS protection on title_pattern in Indexer.index_all()."""

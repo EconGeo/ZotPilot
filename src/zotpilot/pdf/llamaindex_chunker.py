@@ -54,7 +54,12 @@ class LlamaIndexChunker:
             piece = self._truncate(piece.strip())
             if not piece:
                 continue
-            # locate char offset for page mapping (best-effort, like the char chunker)
+            # Locate char offset for page/char metadata mapping.
+            # This is BEST-EFFORT / APPROXIMATE: SentenceSplitter may produce
+            # overlapping pieces (chunk_overlap > 0) and _truncate can shorten a
+            # piece, so `find` may match a slightly wrong position or fall back to
+            # `cursor`. The approximation only affects page_num/char_start/char_end
+            # metadata — it does NOT affect chunk content or the token-cap guarantee.
             start = full_text.find(piece[:64], cursor)
             if start < 0:
                 start = cursor

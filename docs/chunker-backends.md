@@ -137,4 +137,4 @@ This runs the embedder probe. If it fails, the error message will indicate the i
 
 - [Token-Aware Chunking Migration Guide](./superpowers/specs/2026-06-22-chunking-migration.md)
 - ZotPilot configuration: `~/.zotpilot/config.yaml`
-- Upstream chunker protocol: `src/zotpilot/pdf/chunker.py`
+- Upstream chunker protocol: `src/zotpilot/pdf/chunker_base.py`

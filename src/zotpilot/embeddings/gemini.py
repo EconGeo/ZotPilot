@@ -132,6 +132,11 @@ class GeminiEmbedder:
         if not texts:
             return []
 
+        # Truncate each text to Gemini's 2048-token limit as a safety net,
+        # matching the truncation behaviour of the Ollama/DashScope embedders.
+        from .base import truncate_to_token_budget
+        texts = [truncate_to_token_budget(t, max_tokens=2048) for t in texts]
+
         results = []
         batch_size = 32  # Reduced from 100 to avoid Gemini rate limits
         total_batches = (len(texts) + batch_size - 1) // batch_size

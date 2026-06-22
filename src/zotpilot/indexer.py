@@ -33,7 +33,14 @@ def _config_hash(config: Config) -> str:
     """Hash of config values that affect indexed content.
 
     Changes to these values require re-indexing.
+
+    Legacy note: the ``"char"`` backend (the original default) is intentionally
+    excluded from the hash string so that existing users who never set
+    ``chunker_backend`` see the same hash after the field was introduced.
+    Only non-default backends (e.g. ``"llamaindex"``) extend the string, which
+    ensures those users get the expected "config changed" warning.
     """
+    backend = getattr(config, "chunker_backend", "char")
     data = (
         f"{config.chunk_size}:"
         f"{config.chunk_overlap}:"
@@ -44,9 +51,10 @@ def _config_hash(config: Config) -> str:
         f"{config.ocr_language}:"
         f"{getattr(config, 'vision_enabled', True)}:"
         f"{getattr(config, 'vision_provider', 'anthropic')}:"
-        f"{getattr(config, 'vision_model', '')}:"
-        f"{getattr(config, 'chunker_backend', 'char')}"
+        f"{getattr(config, 'vision_model', '')}"
     )
+    if backend != "char":
+        data += f":{backend}"
     return hashlib.sha256(data.encode()).hexdigest()[:16]
 
 
