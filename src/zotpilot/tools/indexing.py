@@ -37,30 +37,34 @@ def _parse_json_string_list(value: Any) -> Any:
 
 
 def _collect_unindexed_papers(limit: int | None = None, offset: int = 0) -> tuple[list[dict], int]:
-    """Return unindexed Zotero papers and their total count."""
-    zotero = _get_zotero()
-    current_doc_ids = current_library_pdf_doc_ids(zotero)
-    indexed_set = authoritative_indexed_doc_ids(_get_store(), current_doc_ids)
+    """Return unindexed Zotero papers across all libraries and their total count."""
+    from ..indexer import enumerate_indexable_libraries, global_pdf_doc_ids
+    from ..zotero_client import ZoteroClient
+
+    config = _get_config()
+    union = global_pdf_doc_ids(config)
+    indexed_set = authoritative_indexed_doc_ids(_get_store(), union)
+
     papers: list[dict] = []
     total = 0
-
-    for item in zotero.get_all_items_with_pdfs():
-        if item.item_key in indexed_set:
-            continue
-        total += 1
-        if total <= offset:
-            continue
-        if limit is not None and len(papers) >= limit:
-            continue
-        papers.append(
-            {
-                "doc_id": item.item_key,
-                "title": item.title or "(no title)",
-                "year": item.year,
-                "authors": item.authors,
-            }
-        )
-
+    for lib_id, _label in enumerate_indexable_libraries(config):
+        zotero = ZoteroClient(config.zotero_data_dir, library_id=lib_id)
+        for item in zotero.get_all_items_with_pdfs():
+            if item.item_key in indexed_set:
+                continue
+            total += 1
+            if total <= offset:
+                continue
+            if limit is not None and len(papers) >= limit:
+                continue
+            papers.append(
+                {
+                    "doc_id": item.item_key,
+                    "title": item.title or "(no title)",
+                    "year": item.year,
+                    "authors": item.authors,
+                }
+            )
     return papers, total
 
 
@@ -253,8 +257,9 @@ def index_library(
 
         effective_max_pages = max_pages if max_pages is not None else config.max_pages
 
-        indexer = Indexer(config)
-        result = indexer.index_all(
+        from ..indexer import index_all_libraries
+        result = index_all_libraries(
+            config,
             force_reindex=force_reindex,
             limit=limit,
             item_key=item_key,

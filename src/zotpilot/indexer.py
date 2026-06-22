@@ -61,6 +61,107 @@ class IndexResult:
     quality_grade: str = ""  # A/B/C/D/F quality grade per document
 
 
+def enumerate_indexable_libraries(config) -> list[tuple[int, str]]:
+    """Return (sqlite_library_id, label) for the user library plus every group.
+
+    User library is always first as (1, name). Group ``library_id`` values from
+    ``get_libraries()`` are Zotero groupIDs and are resolved to SQLite libraryIDs.
+    """
+    zc = ZoteroClient(config.zotero_data_dir)
+    libs: list[tuple[int, str]] = []
+    groups: list[tuple[int, str]] = []
+    for lib in zc.get_libraries():
+        if lib["library_type"] == "user":
+            libs.append((1, lib["name"]))
+        else:
+            sqlite_id = ZoteroClient.resolve_group_library_id(
+                config.zotero_data_dir, int(lib["library_id"])
+            )
+            groups.append((sqlite_id, lib["name"]))
+    return libs + groups
+
+
+def global_pdf_doc_ids(config) -> set[str]:
+    """Union of Zotero item keys with resolved PDF files across all libraries."""
+    from .index_authority import current_library_pdf_doc_ids
+
+    ids: set[str] = set()
+    for lib_id, _label in enumerate_indexable_libraries(config):
+        zc = ZoteroClient(config.zotero_data_dir, library_id=lib_id)
+        ids |= current_library_pdf_doc_ids(zc)
+    return ids
+
+
+def index_all_libraries(
+    config,
+    *,
+    force_reindex: bool = False,
+    limit: int | None = None,
+    item_key: str | None = None,
+    item_keys: list[str] | None = None,
+    title_pattern: str | None = None,
+    max_pages: int = 0,
+    batch_size: int | None = None,
+    journal=None,
+) -> dict:
+    """Index every Zotero library (user + groups), protecting all libraries' docs.
+
+    Passes the full cross-library PDF doc-id union as ``protected_doc_ids`` to each
+    per-library ``Indexer.index_all`` so reconciliation only removes docs absent
+    from every library. Threads ``batch_size`` as a budget across libraries.
+    """
+    union = global_pdf_doc_ids(config)
+    libraries = enumerate_indexable_libraries(config)
+
+    agg_results: list = []
+    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0,
+              "already_indexed": 0, "skipped_long": 0}
+    long_documents: list = []
+    skipped_no_pdf: list = []
+    has_more = False
+    budget = batch_size  # None => unlimited per library
+
+    for lib_id, _label in libraries:
+        if budget is not None and budget <= 0:
+            has_more = True  # ran out before visiting this library
+            break
+
+        res = Indexer(config, library_id=lib_id).index_all(
+            force_reindex=force_reindex,
+            limit=limit,
+            item_key=item_key,
+            item_keys=item_keys,
+            title_pattern=title_pattern,
+            max_pages=max_pages,
+            batch_size=budget,
+            journal=journal,
+            protected_doc_ids=union,
+        )
+
+        agg_results.extend(res.get("results", []))
+        for k in summed:
+            summed[k] += res.get(k, 0)
+        long_documents.extend(res.get("long_documents", []))
+        skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
+
+        progress = res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
+        if budget is not None:
+            budget -= progress
+
+        if batch_size is not None and res.get("has_more") and progress > 0:
+            has_more = True
+            break  # real work done and more remains -> resume here next call
+        elif batch_size is None and res.get("has_more"):
+            has_more = True  # full sweep: aggregate but keep going
+        # batched + has_more + zero progress -> fall through to next library
+
+    out = {"results": agg_results, "has_more": has_more}
+    out.update(summed)
+    out["long_documents"] = long_documents
+    out["skipped_no_pdf"] = skipped_no_pdf
+    return out
+
+
 class Indexer:
     """
     Orchestrates the full indexing pipeline.
