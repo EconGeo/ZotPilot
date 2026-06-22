@@ -223,7 +223,7 @@ class TestOllamaEmbedder:
 
         assert result == [[0.1, 0.2, 0.3]]
         payload = mock_post.call_args.kwargs["json"]
-        assert payload["model"] == "nomic-embed-text"
+        assert payload["model"] == "bge-large"
         assert payload["input"] == ["test text"]
 
     def test_embed_empty_input(self):
@@ -252,7 +252,7 @@ class TestOllamaEmbedder:
 
     def test_default_dimensions(self):
         embedder = OllamaEmbedder()
-        assert embedder.dimensions == 768
+        assert embedder.dimensions == 1024
 
     def test_custom_model_and_url(self):
         embedder = OllamaEmbedder(model="mxbai-embed-large", base_url="http://192.168.1.10:11434")
