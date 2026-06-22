@@ -154,6 +154,106 @@ def global_pdf_doc_ids(config) -> set[str]:
     return ids
 
 
+def index_all_libraries(
+    config,
+    *,
+    force_reindex: bool = False,
+    limit: int | None = None,
+    item_key: str | None = None,
+    item_keys: list[str] | None = None,
+    title_pattern: str | None = None,
+    max_pages: int = 0,
+    batch_size: int | None = None,
+    journal=None,
+    progress_sink=None,
+) -> dict:
+    """Index every Zotero library (user + groups), reconciling orphans once globally.
+
+    Each per-library ``index_all`` runs with ``reconcile=False``; after all
+    libraries are processed a single ``reconcile_orphaned_index_docs`` runs against
+    the cross-library PDF doc-id union, so an orphan is a doc present in NO library.
+    Threads ``batch_size`` as a budget across libraries.
+    """
+    union = global_pdf_doc_ids(config)
+    libraries = enumerate_indexable_libraries(config)
+
+    agg_results: list = []
+    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "skipped_long": 0}
+    agg_quality_distribution: dict[str, int] = {}
+    agg_extraction_stats: dict[str, int] = {}
+    long_documents: list = []
+    skipped_no_pdf: list = []
+    has_more = False
+    budget = batch_size  # None => unlimited per library
+    last_idxr = None
+    any_unreachable = False
+
+    for lib_id, _label in libraries:
+        if budget is not None and budget <= 0:
+            has_more = True  # ran out before visiting this library
+            break
+
+        idxr = Indexer(config, library_id=lib_id)
+        any_unreachable = any_unreachable or idxr._library_unreachable()
+        res = idxr.index_all(
+            force_reindex=force_reindex,
+            limit=limit,
+            item_key=item_key,
+            item_keys=item_keys,
+            title_pattern=title_pattern,
+            max_pages=max_pages,
+            batch_size=budget,
+            journal=journal,
+            progress_sink=progress_sink,
+            reconcile=False,  # defer to the single global pass below
+        )
+        last_idxr = idxr
+
+        agg_results.extend(res.get("results", []))
+        for k in summed:
+            summed[k] += res.get(k, 0)
+        long_documents.extend(res.get("long_documents", []))
+        skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
+        for grade, count in res.get("quality_distribution", {}).items():
+            agg_quality_distribution[grade] = agg_quality_distribution.get(grade, 0) + count
+        for stat, count in res.get("extraction_stats", {}).items():
+            agg_extraction_stats[stat] = agg_extraction_stats.get(stat, 0) + count
+
+        progress = res.get("indexed", 0) + res.get("failed", 0) + res.get("empty", 0)
+        if budget is not None:
+            budget -= progress
+
+        if batch_size is not None and res.get("has_more") and progress > 0:
+            has_more = True
+            break  # real work done and more remains -> resume here next call
+        elif batch_size is None and res.get("has_more"):
+            has_more = True  # full sweep: aggregate but keep going
+
+    # Single global reconciliation: an orphan is a doc present in NO library. The
+    # union is read from Zotero up front, so this is safe even on partial/batched
+    # runs. The mass-delete floor + any_unreachable still guard against bad reads.
+    if last_idxr is not None:
+        reconcile_orphaned_index_docs(
+            last_idxr.store, union, library_unreachable=any_unreachable
+        )
+
+    # already_indexed = distinct docs present in BOTH the union and the store
+    # (NOT the sum of per-library counts).
+    if last_idxr is not None and getattr(last_idxr, "store", None) is not None:
+        already_indexed = len(last_idxr.store.get_indexed_doc_ids() & union)
+    else:
+        already_indexed = 0
+
+    out = {"results": agg_results, "has_more": has_more}
+    out.update(summed)
+    out["already_indexed"] = already_indexed
+    out["long_documents"] = long_documents
+    out["skipped_no_pdf"] = skipped_no_pdf
+    out["quality_distribution"] = agg_quality_distribution
+    out["extraction_stats"] = agg_extraction_stats
+    return out
+
+
 class Indexer:
     """
     Orchestrates the full indexing pipeline.
