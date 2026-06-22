@@ -61,6 +61,7 @@ class GeminiEmbedder:
             f"{len(batch)} texts, {total_chars} chars total"
         )
 
+        last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -81,27 +82,30 @@ class GeminiEmbedder:
                 )
                 return [e.values for e in response.embeddings]
 
-            except concurrent.futures.TimeoutError:
+            except concurrent.futures.TimeoutError as e:
+                last_exc = e
                 logger.warning(
                     f"Batch {batch_num}/{total_batches} timed out after "
                     f"{self.timeout}s (attempt {attempt}/{self.max_retries})"
                 )
             except Exception as e:
+                last_exc = e
                 logger.warning(
                     f"Batch {batch_num}/{total_batches} failed "
                     f"(attempt {attempt}/{self.max_retries}): {type(e).__name__}: {e}"
                 )
 
             if attempt < self.max_retries:
-                retry_after = _parse_retry_delay(str(e))
+                retry_after = _parse_retry_delay(str(last_exc))
                 backoff = retry_after if retry_after is not None else 2 ** attempt
                 logger.info(f"Retrying in {backoff}s...")
                 time.sleep(backoff)
 
         raise EmbeddingError(
             f"Batch {batch_num}/{total_batches} failed after "
-            f"{self.max_retries} attempts ({len(batch)} texts, {total_chars} chars)"
-        )
+            f"{self.max_retries} attempts ({len(batch)} texts, {total_chars} chars): "
+            f"{type(last_exc).__name__}: {last_exc}"
+        ) from last_exc
 
     def embed(
         self,
