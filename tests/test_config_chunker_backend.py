@@ -8,15 +8,6 @@ import pytest
 from zotpilot.config import Config, _config_hash
 
 
-def _load_config(tmp_path, **json_fields):
-    """Write a minimal config JSON and load it, passing extra json_fields."""
-    data = {}
-    data.update(json_fields)
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps(data))
-    return Config.load(path=config_file)
-
-
 # ---------------------------------------------------------------------------
 # Test 1: chunker_backend defaults to "char"
 # ---------------------------------------------------------------------------

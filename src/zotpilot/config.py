@@ -419,8 +419,11 @@ def _config_hash(config: "Config") -> str:
     Changes to these values require re-indexing. The ``embedding_base_url`` is
     folded in CONDITIONALLY -- only for the openai-compatible provider -- so all
     existing providers hash byte-identically to prior releases (no forced
-    reindex on upgrade). Relocated here from ``indexer.py`` so the lightweight
-    CLI can import it without dragging in the indexer's heavy dependencies.
+    reindex on upgrade). Likewise, ``chunker_backend`` is appended only when it
+    differs from the default ``"char"``, so existing char-backend indexes hash
+    identically and are not forced to reindex after upgrade. Relocated here from
+    ``indexer.py`` so the lightweight CLI can import it without dragging in the
+    indexer's heavy dependencies.
     """
     data = (
         f"{config.chunk_size}:"
