@@ -26,6 +26,9 @@ data/
 docs/*
 !docs/e2e-scenarios/
 !docs/e2e-scenarios/**
+!docs/superpowers/
+!docs/superpowers/**
+!docs/chunker-backends.md
 docs/test-runs/
 
 # Playwright MCP logs

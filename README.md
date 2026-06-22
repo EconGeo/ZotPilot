@@ -443,6 +443,18 @@ Gemini 免费额度约 1,000 请求/天，够索引几百篇；超出后 $0.15/�
 
 ---
 
+## Indexing Reliability & Chunking
+
+For detailed documentation on token-aware chunking backends, indexing reliability improvements, and migration guidance, see [**docs/chunker-backends.md**](docs/chunker-backends.md) and [**docs/superpowers/specs/2026-06-22-chunking-migration.md**](docs/superpowers/specs/2026-06-22-chunking-migration.md).
+
+Key highlights:
+- **Token-aware chunker:** Install with `pip install zotpilot[llamaindex]` and enable via `chunker_backend: "llamaindex"` to ensure chunks respect embedding model limits.
+- **Preflight checks:** Misconfigured embedders now fail in seconds, not hours.
+- **`--limit 0` semantics:** Now correctly means "index nothing."
+- **Ollama robustness:** Over-long chunks are transparently truncated and sent in sub-batches.
+
+---
+
 <details>
 <summary><b>开发 / 贡献</b></summary>
 
