@@ -418,6 +418,7 @@ class Indexer:
         batch_size: int | None = None,
         journal: IndexJournal | None = None,
         progress_sink: ProgressSink | None = None,
+        reconcile: bool = True,
     ) -> dict:
         """
         Index all PDFs in Zotero library.
@@ -489,21 +490,22 @@ class Indexer:
             logger.info(f"Deduplicated {len(items) - len(unique_items)} duplicate item(s)")
         items = unique_items
         current_doc_ids = {item.item_key for item in items}
-        reconciliation = reconcile_orphaned_index_docs(
-            self.store,
-            current_doc_ids,
-            library_unreachable=self._library_unreachable(),
-        )
-        if reconciliation.get("refused_mass_delete"):
-            logger.warning(
-                "Indexer: refused to delete orphaned indexed document(s) — %s",
-                reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+        if reconcile:
+            reconciliation = reconcile_orphaned_index_docs(
+                self.store,
+                current_doc_ids,
+                library_unreachable=self._library_unreachable(),
             )
-        elif reconciliation["deleted_count"] > 0:
-            logger.info(
-                "Indexer: removed %d orphaned indexed document(s) not present in the current Zotero PDF library",
-                reconciliation["deleted_count"],
-            )
+            if reconciliation.get("refused_mass_delete"):
+                logger.warning(
+                    "Indexer: refused to delete orphaned indexed document(s) — %s",
+                    reconciliation.get("skipped_reason", "mass-deletion safety floor triggered"),
+                )
+            elif reconciliation["deleted_count"] > 0:
+                logger.info(
+                    "Indexer: removed %d orphaned indexed document(s) not present in the current Zotero PDF library",
+                    reconciliation["deleted_count"],
+                )
         logger.info(f"Discovered {len(items)} papers with PDFs in Zotero library")
 
         # Apply filters
@@ -1144,7 +1146,7 @@ class Indexer:
         # per no-op/small batch call is pure overhead (the default batch_size
         # makes many such calls). A run that committed nothing spanned no
         # meaningful window for new deletions.
-        if counts["indexed"] > 0:
+        if reconcile and counts["indexed"] > 0:
             final_current_doc_ids = {
                 item.item_key
                 for item in self.zotero.get_all_items_with_pdfs()

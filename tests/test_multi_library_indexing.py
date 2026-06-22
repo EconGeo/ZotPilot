@@ -31,3 +31,42 @@ def test_indexer_forwards_library_id_to_client(monkeypatch, tmp_path):
     )
     idx.Indexer(cfg, library_id=7)
     assert captured["library_id"] == 7
+
+
+def test_index_all_skips_reconcile_when_disabled(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        idx, "reconcile_orphaned_index_docs",
+        lambda *a, **k: calls.append(a) or {"deleted_count": 0},
+    )
+    # Build an Indexer shell without running heavy __init__.
+    inst = idx.Indexer.__new__(idx.Indexer)
+    inst.config = types.SimpleNamespace(zotero_data_dir=None, chroma_db_path=tmp_path)
+
+    class _Z:
+        def get_all_items_with_pdfs(self):
+            return []  # empty library -> startup reconcile is the only candidate
+
+    class _Store:
+        def get_indexed_doc_ids(self):
+            return []
+
+    inst.zotero = _Z()
+    inst.store = _Store()
+    inst.journal = None
+    inst._formula_provider = None
+    inst._vision_api = None
+    # Stub out filesystem-dependent helpers not under test.
+    monkeypatch.setattr(idx.Indexer, "_ensure_formula_provider_available", lambda self: None)
+    monkeypatch.setattr(idx.Indexer, "_library_unreachable", lambda self: False)
+    monkeypatch.setattr(idx.Indexer, "_load_empty_docs", lambda self: {})
+    monkeypatch.setattr(idx.Indexer, "_save_empty_docs", lambda self, m: None)
+    # _config_hash_path.exists() must return False so stored_hash stays None (no drift check).
+    inst._config_hash_path = types.SimpleNamespace(exists=lambda: False, write_text=lambda t: None)
+    monkeypatch.setattr(idx, "_config_hash", lambda c: "test-hash")
+
+    inst.index_all(reconcile=False)
+    assert calls == []  # reconciliation suppressed
+
+    inst.index_all(reconcile=True)
+    assert len(calls) == 1  # startup reconcile ran (empty-library no-op call)
