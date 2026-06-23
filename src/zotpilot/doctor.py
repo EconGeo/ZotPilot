@@ -92,8 +92,8 @@ def _check_embedding_api_key(config) -> CheckResult:
     """Check that the required embedding API key is set."""
     provider = config.embedding_provider
 
-    if provider == "local":
-        return CheckResult("embedding_api_key", "pass", "provider=local (no key needed)")
+    if provider in ("local", "ollama"):
+        return CheckResult("embedding_api_key", "pass", f"provider={provider} (no key needed)")
 
     if provider == "gemini":
         if config.gemini_api_key:

@@ -62,6 +62,11 @@ class TestCheckEmbeddingApiKey:
         config.embedding_provider = "local"
         assert _check_embedding_api_key(config).status == "pass"
 
+    def test_ollama_no_key_needed(self):
+        config = MagicMock()
+        config.embedding_provider = "ollama"
+        assert _check_embedding_api_key(config).status == "pass"
+
     def test_missing_gemini_key_fails(self):
         config = MagicMock()
         config.embedding_provider = "gemini"
