@@ -105,6 +105,13 @@ class VectorStore:
             settings=Settings(anonymized_telemetry=False)
         )
 
+        # Chroma rejects single add()/upsert() calls larger than this (SQLite host-
+        # parameter ceiling). We slice every insert to stay under it. Leave headroom.
+        try:
+            self._max_add_batch = max(1, self.client.get_max_batch_size() - 1)
+        except Exception:
+            self._max_add_batch = 5000  # safe floor for older/edge Chroma builds
+
         # Get embedder dimensions
         embedder_dims = getattr(embedder, 'dimensions', None)
 
@@ -160,6 +167,24 @@ class VectorStore:
             "quality_grade": doc_meta.get("quality_grade", ""),
         }
 
+    def _add_batched(self, *, ids, documents, embeddings, metadatas) -> None:
+        """Insert into Chroma in slices <= the client max batch size.
+
+        Chroma's collection.add() rejects calls larger than
+        client.get_max_batch_size() (5461 on the SQLite backend). Large
+        documents (books) routinely exceed this, so we slice every insert.
+        """
+        n = len(ids)
+        step = self._max_add_batch
+        for i in range(0, n, step):
+            sl = slice(i, i + step)
+            self.collection.add(
+                ids=ids[sl],
+                documents=documents[sl],
+                embeddings=embeddings[sl],
+                metadatas=metadatas[sl],
+            )
+
     def add_chunks(self, doc_id: str, doc_meta: dict, chunks: list[Chunk]) -> None:
         """
         Add all chunks for a document.
@@ -193,12 +218,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._add_batched(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def add_tables(
         self,
@@ -247,12 +267,7 @@ class VectorStore:
             })
             metadatas.append(meta)
 
-        self.collection.add(
-            ids=ids,
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas
-        )
+        self._add_batched(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
 
     def add_figures(
         self,
@@ -303,12 +318,7 @@ class VectorStore:
 
         if ids:
             embeddings = self.embedder.embed(documents, task_type="RETRIEVAL_DOCUMENT")
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
+            self._add_batched(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
 
     def _cached_embed_query(self, query: str) -> list[float]:
         """Embed a query, returning cached result if available."""
