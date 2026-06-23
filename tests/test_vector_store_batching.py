@@ -74,10 +74,18 @@ class TestChromaBatchSize:
                 f"add() called with {len(call_ids)} ids, exceeds cap {cap}"
             )
 
-        # Concatenation of all recorded ids must equal the expected ids in order
-        all_recorded = [chunk_id for call in recorder.calls for chunk_id in call]
-        expected_ids = [f"BIG001_chunk_{i:04d}" for i in range(n)]
-        assert all_recorded == expected_ids, "ids were dropped or reordered"
+        # Concatenation of all recorded ids
+        inserted_ids = [chunk_id for call in recorder.calls for chunk_id in call]
+
+        # Verify no drops
+        assert len(inserted_ids) == n, f"expected {n} ids, got {len(inserted_ids)}"
+
+        # Verify no duplicates and correct order (by extracting chunk_index from chunks)
+        expected_ids = [f"BIG001_chunk_{c.chunk_index:04d}" for c in chunks]
+        assert inserted_ids == expected_ids, "ids were dropped, duplicated, or reordered"
+
+        # Explicit no-duplicates check
+        assert len(set(inserted_ids)) == n, "found duplicate ids"
 
     # ------------------------------------------------------------------
     # Test 2 — edge cases on the slicing boundary (drive _add_batched directly)

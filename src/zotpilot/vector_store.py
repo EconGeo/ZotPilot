@@ -174,6 +174,9 @@ class VectorStore:
         client.get_max_batch_size() (5461 on the SQLite backend). Large
         documents (books) routinely exceed this, so we slice every insert.
         """
+        if not ids:
+            return
+
         n = len(ids)
         step = self._max_add_batch
         for i in range(0, n, step):
