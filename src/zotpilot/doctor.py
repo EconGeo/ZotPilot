@@ -131,7 +131,11 @@ def _check_chromadb_index(config) -> CheckResult:
         from .zotero_client import ZoteroClient
 
         embedder = create_embedder(config)
-        store = VectorStore(config.chroma_db_path, embedder)
+        store = VectorStore(
+            config.chroma_db_path,
+            embedder,
+            collection_name=getattr(config, "collection_name", "chunks"),
+        )
         zotero = ZoteroClient(config.zotero_data_dir)
         current_doc_ids = current_library_pdf_doc_ids(zotero)
         doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)

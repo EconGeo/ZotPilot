@@ -107,6 +107,27 @@ class TestCheckChromaDbIndex:
         config.zotero_data_dir = "/fake"
         assert _check_chromadb_index(config).status == "warn"
 
+    @patch("zotpilot.zotero_client.ZoteroClient")
+    @patch("zotpilot.vector_store.VectorStore")
+    @patch("zotpilot.embeddings.create_embedder")
+    def test_uses_configured_collection_name(
+        self, _mock_create_embedder, mock_vector_store_cls, mock_zotero_cls
+    ):
+        """Doctor must inspect the configured collection, not the hardcoded default."""
+        mock_store = MagicMock()
+        mock_store.get_indexed_doc_ids.return_value = []
+        mock_store.count_chunks_for_doc_ids.return_value = 0
+        mock_vector_store_cls.return_value = mock_store
+        mock_zotero_cls.return_value = MagicMock()
+
+        config = MagicMock()
+        config.zotero_data_dir = "/fake"
+        config.collection_name = "chunks_bge"
+        _check_chromadb_index(config)
+
+        _, kwargs = mock_vector_store_cls.call_args
+        assert kwargs.get("collection_name") == "chunks_bge"
+
 
 class TestCheckZoteroWebApi:
     def _make_config(self, api_key=None, user_id=None):
