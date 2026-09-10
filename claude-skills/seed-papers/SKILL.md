@@ -1,25 +1,31 @@
 ---
 name: seed-papers
 description: >
-  Seed a project's bibliography from the local Zotero library before running /discover lit.
+  Seed a project's bibliography from the local Zotero library before the literature review.
   Trigger on: "seed papers", "search my library first", "seed the bibliography",
   "check what I already have on X", "pre-search my library",
-  or at the start of /discover lit when ZotPilot is available.
+  or at the start of the literature review when ZotPilot is available.
   Outputs: bibliography_base.bib (BibTeX entries) + zotero_seed.md (annotation summaries).
-  Run BEFORE /discover lit so the librarian agent knows what's already covered.
+  Run BEFORE the literature review so it knows what is already covered.
 allowed-tools: Read,Write,Edit,Grep,Glob
 ---
 
 # Seed Papers — Pre-search Local Library Before Literature Review
 
-Seeds a project's `bibliography_base.bib` from the local Zotero ChromaDB index.
-The librarian agent reads this file automatically at the start of `/discover lit`,
-so running this skill first prevents duplicated search effort and surfaces anchor
-papers the user already knows.
+Seeds a project's `bibliography_base.bib` from the local Zotero ChromaDB index,
+so the literature review starts from the anchor papers the user already knows
+instead of rediscovering them.
 
-**Architecture note:** The librarian agent has no MCP tools and cannot query ChromaDB
-directly. This skill (running in the main session with MCP access) is the bridge:
-  ZotPilot/ChromaDB → (this skill, main session) → `bibliography_base.bib` → librarian reads
+**Architecture note:** literature-review subagents have no MCP tools and cannot query
+ChromaDB directly. This skill (running in the main session with MCP access) is the bridge:
+  ZotPilot/ChromaDB → (this skill, main session) → `bibliography_base.bib` → the review reads
+
+**Downstream consumers differ.** Check what your literature-review step actually reads
+before relying on the seed. In research-claude, `/lit-position` searches the local Zotero
+index directly (`.claude/rules/literature-search-order.md`) and treats Zotero — not a
+hand-maintained `.bib` — as the source of truth, so it does not read
+`bibliography_base.bib`; the seed's value there is the confirmed anchor set and
+`zotero_seed.md`, not the file itself.
 
 ---
 
@@ -122,7 +128,7 @@ For each included paper, write:
 - **Relevance:** <why this matters for the current project>
 ```
 
-End the file with a `## Notes for Librarian` section summarizing:
+End the file with a `## Notes for the Literature Review` section summarizing:
 - Which subfields are already well-covered (no need to extend)
 - Where the web search should focus (gaps, recent work, reform effects)
 - Any scooping risks to watch for
@@ -135,8 +141,9 @@ Report:
 - Summary of coverage by theme
 
 Then say:
-> "Run `/discover lit [topic]` next. The librarian will read `bibliography_base.bib`
-> automatically and extend outward from these anchor papers."
+> "Run the literature review next (`/lit-position [topic]` in research-claude).
+> These anchor papers are already in the local index it searches first, so it can
+> extend outward from them rather than rediscovering them."
 
 ---
 
@@ -144,7 +151,7 @@ Then say:
 
 **ZotPilot not indexed:** If `search_topic` returns an error or empty results,
 say: "ZotPilot index not found or empty. Run `/ztp-setup` to index your library,
-then re-run `/seed-papers`. Alternatively, run `/discover lit` directly — the librarian
+then re-run `/seed-papers`. Alternatively, run the literature review directly — it
 will search from scratch."
 
 **No papers confirmed by user:** Write an empty `bibliography_base.bib` with a
