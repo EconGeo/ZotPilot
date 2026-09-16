@@ -188,7 +188,7 @@ zotpilot config set openalex_email you@example.com
 
 入库工作流默认只说明 Chrome：
 
-1. 打开 [最新 Release](https://github.com/xunhe730/ZotPilot/releases/latest)，下载 `zotpilot-connector-v*.zip` 并解压
+1. 打开[上游的最新 Release](https://github.com/xunhe730/ZotPilot/releases/latest)（本 fork 不单独发布 connector 构建），下载 `zotpilot-connector-v*.zip` 并解压
 2. Chrome 地址栏打开 `chrome://extensions/`
 3. 打开右上角**开发者模式**
 4. 点击**加载已解压的扩展程序**
@@ -459,7 +459,7 @@ Key highlights:
 <summary><b>开发 / 贡献</b></summary>
 
 ```bash
-git clone https://github.com/xunhe730/ZotPilot.git
+git clone https://github.com/EconGeo/ZotPilot.git
 cd ZotPilot
 pip install -e ".[dev]"
 
@@ -485,8 +485,8 @@ npm install
   <br><br>
   <sub>Claude Code &middot; Codex &middot; OpenCode</sub>
   <br><br>
-  <a href="https://github.com/xunhe730/ZotPilot/issues">报告问题</a> &middot;
-  <a href="https://github.com/xunhe730/ZotPilot/discussions">讨论</a>
+  <a href="https://github.com/EconGeo/ZotPilot/issues">报告问题</a> &middot;
+  <a href="https://github.com/EconGeo/ZotPilot/discussions">讨论</a>
   <br>
   <sub>MIT License &copy; 2026 xunhe</sub>
 </div>
