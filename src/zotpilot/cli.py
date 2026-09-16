@@ -14,6 +14,7 @@ from ._platforms import (
     _get_current_version,
     _get_latest_pypi_version,
     _get_skill_dirs,  # noqa: F401 — re-exported for test patching compatibility
+    _get_vcs_install_url,
 )
 from .config import Config, _default_config_dir
 from .credential_migration import migrate_secrets
@@ -859,6 +860,14 @@ def _is_windows_lock_error(stderr: str) -> bool:
     ])
 
 
+def _pip_vcs_target(url: str) -> str:
+    """Render a recorded VCS URL as a pip install target.
+
+    direct_url.json stores the bare URL; pip needs the `git+` scheme prefix.
+    """
+    return url if url.startswith("git+") else f"git+{url}"
+
+
 def cmd_update(args):
     """Upgrade ZotPilot CLI and skill files."""
     errors: list[str] = []
@@ -868,8 +877,19 @@ def cmd_update(args):
 
     # Step 1: Version info
     old_ver = _get_current_version()
+    vcs_url = _get_vcs_install_url()
 
-    if not args.dry_run:
+    # Only an install that CAME from PyPI may be compared against PyPI. The
+    # `zotpilot` project there is upstream xunhe730/ZotPilot — a different
+    # lineage from this fork, not a newer revision of it — so for a git or
+    # editable install its version number is not an upgrade and offering it as
+    # one walks the user off this build.
+    from_pypi = installer in ("uv", "pip", "unknown")
+
+    if args.dry_run:
+        latest = None
+        print(f"[dry-run] current version: {old_ver} (PyPI check skipped)")
+    elif from_pypi:
         latest = _get_latest_pypi_version()
         if latest:
             print(f"  Installed: {old_ver}")
@@ -880,10 +900,19 @@ def cmd_update(args):
             warnings.append("PyPI unreachable")
     else:
         latest = None
-        print(f"[dry-run] current version: {old_ver} (PyPI check skipped)")
+        print(f"  Installed: {old_ver}")
+        print(f"  Source:    {vcs_url or 'local checkout (editable install)'}")
+        print("  Latest:    (not checked — this install did not come from PyPI)")
 
     # Step 2: --check mode — just report, always exit 0
     if args.check:
+        if not from_pypi:
+            if vcs_url:
+                print("Installed from a git source, not PyPI — there is no PyPI version to compare against.")
+                print(f"Update with:  pip install --upgrade --force-reinstall {_pip_vcs_target(vcs_url)}")
+            else:
+                print("Dev install — update by running git pull in the repo.")
+            return 0
         if latest is None:
             print("Warning: Cannot reach PyPI to check for updates")
         elif old_ver == latest:
@@ -908,6 +937,36 @@ def cmd_update(args):
                 except FileNotFoundError:
                     manual = " ".join(uv_cmd + ["tool", "upgrade", "zotpilot"])
                     print(f"Command not found ({cmd[0]}) — run manually: {manual}")
+                    errors.append(f"{cmd[0]} not found")
+                    return 1
+                except subprocess.CalledProcessError as e:
+                    if _is_windows_lock_error(e.stderr or ""):
+                        print("Update failed — the zotpilot executable appears to be locked "
+                              "by a running process (e.g. MCP server).\n"
+                              "Close all MCP clients (Cursor, VS Code, etc.) and try again.")
+                        if e.stderr:
+                            print(f"\nOriginal error:\n{e.stderr}")
+                    else:
+                        print(e.stderr or "Upgrade failed", file=sys.stderr)
+                    errors.append("CLI update failed")
+                    return 1
+        elif installer == "git":
+            if not vcs_url:
+                print("Installed from a git source, but the source URL could not be read from "
+                      "direct_url.json. Reinstall manually from the repository you installed from.")
+                errors.append("vcs install: source URL unknown")
+                return 1
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall",
+                   _pip_vcs_target(vcs_url)]
+            if args.dry_run:
+                print(f"[dry-run] Would run: {' '.join(cmd)}")
+            else:
+                try:
+                    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    print(result.stdout.strip() or "CLI updated.")
+                except FileNotFoundError:
+                    print(f"Command not found ({cmd[0]}) — run manually: "
+                          f"pip install --upgrade --force-reinstall {_pip_vcs_target(vcs_url)}")
                     errors.append(f"{cmd[0]} not found")
                     return 1
                 except subprocess.CalledProcessError as e:
@@ -949,6 +1008,8 @@ def cmd_update(args):
             print("  uv tool upgrade zotpilot")
             print("  # or:")
             print("  pip install --upgrade zotpilot")
+            print("  # NOTE: `zotpilot` on PyPI is upstream xunhe730/ZotPilot. If you installed")
+            print("  # this fork from git, reinstall from that URL instead.")
             errors.append("installer unknown: cannot auto-update CLI")
 
     # Step 4: Runtime / registration maintenance (unless --cli-only)

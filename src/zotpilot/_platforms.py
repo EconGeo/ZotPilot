@@ -1098,6 +1098,10 @@ def _detect_cli_installer() -> "tuple[str, list[str] | None]":
             dir_info = data.get("dir_info", {})
             if dir_info.get("editable"):
                 return ("editable", None)
+            # Step 1b: installed from a VCS URL (pip install git+https://...).
+            # PyPI is not this build's source, so it must not drive its upgrade.
+            if data.get("vcs_info"):
+                return ("git", None)
     except importlib.metadata.PackageNotFoundError:
         return ("unknown", None)
     except json.JSONDecodeError:
@@ -1135,6 +1139,27 @@ def _get_current_version() -> str:
             return __version__
         except Exception:
             return "unknown"
+
+def _get_vcs_install_url() -> "str | None":
+    """Return the URL a VCS install came from, or None if this is not one.
+
+    `pip install git+<url>` records {"url": ..., "vcs_info": {...}} in
+    direct_url.json. That URL, not the PyPI name, is what an upgrade must
+    reinstall from: the `zotpilot` project on PyPI is upstream
+    xunhe730/ZotPilot, a different lineage from this fork.
+    """
+    try:
+        dist = importlib.metadata.distribution("zotpilot")
+        direct_url_text = dist.read_text("direct_url.json")
+        if not direct_url_text:
+            return None
+        data = json.loads(direct_url_text)
+        if data.get("vcs_info"):
+            return data.get("url")
+    except (importlib.metadata.PackageNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    return None
+
 
 def _get_latest_pypi_version() -> "str | None":
     """Fetch the latest zotpilot version from PyPI. Returns None on any error."""

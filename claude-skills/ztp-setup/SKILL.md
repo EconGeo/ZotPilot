@@ -25,10 +25,12 @@ description: >
    `pip install --upgrade --force-reinstall git+https://github.com/EconGeo/ZotPilot.git`
    (dev checkout: `git pull` — an editable install needs nothing else.)
 
-   **Do not run `zotpilot upgrade` on a fork install.** It resolves "latest" from PyPI, so
-   it reports an upgrade to upstream against a version that is not newer, and on a
-   non-editable install it then runs `pip install --upgrade zotpilot` and replaces this fork
-   with upstream. A version gap against PyPI is expected here, not a defect.
+   `zotpilot upgrade` is also safe on a current build: it reinstalls from the URL pip
+   recorded for this install and does not consult PyPI. **On a build older than the
+   fork-aware upgrade fix it did resolve "latest" from PyPI and could replace this fork
+   with upstream.** Tell the two apart with `zotpilot upgrade --check`: if it prints a
+   `Latest:` version number, the build predates the fix — use the explicit command above.
+   A version gap against PyPI is expected here, not a defect.
 4. **Provider Selection**: Determine the user's preferred embedding platform.
    - **gemini**: Requires Google API key. Paid, but provides high-quality embeddings.
    - **dashscope**: Aliyun service. Preferred for Chinese users.
