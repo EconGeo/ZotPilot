@@ -42,17 +42,22 @@
 
 ---
 
-## EconGeo Fork (econgeo/v0.6)
+## EconGeo Fork
 
-This is a maintained fork of [xunhe730/ZotPilot](https://github.com/xunhe730/ZotPilot) that adds:
+This is a maintained fork of [xunhe730/ZotPilot](https://github.com/xunhe730/ZotPilot). It is
+the version this project ships and supports, and it **does not track upstream** — see
+[Relationship to upstream](#relationship-to-upstream) below.
 
-| Patch | What it fixes |
+| Addition | What it does |
 |-------|--------------|
-| **BBT 7+ compatibility** | Zotero's Better BibTeX plugin changed its internal schema in version 7; this fork's `_load_citation_keys` falls back from the missing `citationkey` table to the LokiJS JSON blob in the `better-bibtex` table |
-| **Group library indexing** | Upstream CLI hardcodes personal library; the fork's `Indexer.__init__` accepts an optional `library_id` param so you can index group libraries |
-| **Gemini 429 retry** | Respects the `retryDelay` field in Gemini API error responses instead of hammering with a fixed interval |
-| **Ollama embedding provider** | Local embeddings via `nomic-embed-text` (768 dims) — no API key, no quota, fully offline |
-| **Claude Code skills** | All `ztp-*` skills pre-packaged in `claude-skills/` for easy installation into any project |
+| **Ollama embedding provider** | Local embeddings with no API key, no quota, fully offline. Default model `bge-large` (1024 dims), calling Ollama's native `/api/embed` and applying the BGE query-instruction prefix for query→passage retrieval |
+| **Multi-library indexing** | Indexes the personal library *and* every group library in one pass, with cross-library reconciliation so a paper shared across libraries is not dropped as an orphan |
+| **Token-aware chunking** | Optional LlamaIndex backend (`chunker_backend llamaindex`) that sizes chunks to the embedding model's real token window instead of a chars÷4 estimate |
+| **Indexing reliability** | Oversized inputs truncated, Ollama embed calls sub-batched, ChromaDB inserts batched under `max_batch_size`, real cause surfaced on retry exhaustion, preflight embedder check that fails misconfiguration fast |
+| **BBT 7+ compatibility** | Better BibTeX 7 changed its internal schema; `_load_citation_keys` falls back from the missing `citationkey` table to the LokiJS JSON blob |
+| **Gemini 429 retry** | Respects the `retryDelay` field in Gemini error responses instead of hammering at a fixed interval |
+| **`delete_note` MCP tool** | Note deletion with note-type and ZotPilot-ownership guards |
+| **Claude Code skills** | All `ztp-*` skills packaged in `claude-skills/` and deployed by `zotpilot setup` |
 
 ### Install from this fork
 
@@ -60,27 +65,34 @@ This is a maintained fork of [xunhe730/ZotPilot](https://github.com/xunhe730/Zot
 # Using micromamba (recommended — sandboxed, no system Python pollution)
 micromamba create -n zotpilot python=3.12 -c conda-forge
 micromamba activate zotpilot
-pip install git+https://github.com/EconGeo/ZotPilot.git@econgeo/v0.6
-
-# Or if this branch has been merged to main:
 pip install git+https://github.com/EconGeo/ZotPilot.git
 ```
 
 ### Install Claude Code skills
 
-```bash
-# Copy skills into your project's .claude/skills/
-cp -r claude-skills/ztp-* /your-project/.claude/skills/
-```
+`zotpilot setup` deploys them automatically. To place them by hand instead:
 
-Or install globally (active in all Claude Code projects):
 ```bash
+# Into one project
+cp -r claude-skills/ztp-* /your-project/.claude/skills/
+
+# Or globally, active in all Claude Code projects
 cp -r claude-skills/ztp-* ~/.claude/skills/
 ```
 
+> Deploy skills from **this fork**, not from an upstream install. Upstream's packaged skills
+> drive CLI flags this fork does not implement (`zotpilot setup --list-vendors`, `--verify`),
+> so they error out here.
+
 ### Group library indexing
 
-The CLI only indexes your personal library. Use this Python wrapper to index a group library:
+Indexing covers **all** libraries by default — personal and group — so no wrapper is needed:
+
+```bash
+zotpilot index
+```
+
+To index one specific group library, pass its `library_id`:
 
 ```python
 from zotpilot.indexer import Indexer
@@ -88,7 +100,7 @@ from zotpilot.zotero_client import ZoteroClient
 from zotpilot.config import Config
 
 config = Config.load()
-GROUP_ID = 2350352  # find via Zotero → right-click group → Group Settings → URL
+GROUP_ID = 2350352  # Zotero → right-click group → Group Settings → URL
 group_lib_id = ZoteroClient.resolve_group_library_id(config.zotero_data_dir, GROUP_ID)
 Indexer(config, library_id=group_lib_id).run()
 ```
@@ -97,19 +109,39 @@ Indexer(config, library_id=group_lib_id).run()
 
 ```bash
 brew install ollama && brew services start ollama
-ollama pull nomic-embed-text
+ollama pull bge-large
 
-micromamba run -n zotpilot zotpilot config set embedding_provider ollama
-micromamba run -n zotpilot zotpilot config set embedding_model nomic-embed-text
-micromamba run -n zotpilot zotpilot config set embedding_dimensions 768
+zotpilot config set embedding_provider ollama
+zotpilot config set embedding_model bge-large
+zotpilot config set embedding_dimensions 1024
+zotpilot config set ollama_base_url http://localhost:11434
 ```
 
-### Switching back to upstream when patches merge
+`embedding_dimensions` **must** match the model — this provider passes it straight through and
+never verifies it against the server's response, so a wrong value corrupts the index silently.
+`bge-large`, `mxbai-embed-large` and `snowflake-arctic-embed:l` are 1024; `nomic-embed-text` is
+768; `all-minilm` is 384.
 
-Track upstream PR #14: `gh pr view xunhe730/ZotPilot/14`. When merged, switch to:
+`ollama_base_url` is the **bare Ollama root** — this provider uses the native `/api/embed`, so
+do not append `/v1`.
+
+Changing any embedding setting changes the index fingerprint. Indexing only *warns* on a
+mismatch and carries on, mixing old and new vectors, so rebuild explicitly:
+
 ```bash
-pip install zotpilot   # or git+https://github.com/xunhe730/ZotPilot.git
+zotpilot index --force
 ```
+
+### Relationship to upstream
+
+**This fork does not track upstream, and upstream releases are not upgrades to it.** The fork
+is pinned to a v0.5.0 base plus the work in the table above; upstream has since moved on
+independently and, for example, implemented Ollama a different way (an OpenAI-compatible shim
+plus a vendor catalog) that conflicts with this one rather than merging with it. A higher
+upstream version number does not mean a newer version of *this* code.
+
+Port a specific upstream fix in deliberately if you want it. Do not rebase onto upstream, and
+do not install upstream's package or skills alongside this fork.
 
 ---
 
@@ -257,7 +289,7 @@ zotpilot config set openalex_email you@example.com
 
 This is how ingestion actually works. The default instructions only cover Chrome.
 
-1. Open the [latest release](https://github.com/xunhe730/ZotPilot/releases/latest), download `zotpilot-connector-v*.zip`, and extract it
+1. Open [upstream's latest release](https://github.com/xunhe730/ZotPilot/releases/latest) (this fork does not publish connector builds), download `zotpilot-connector-v*.zip`, and extract it
 2. In Chrome, open `chrome://extensions/`
 3. Enable **Developer mode**
 4. Click **Load unpacked**
@@ -527,7 +559,7 @@ Deeper guidance lives in [troubleshooting.md](references/troubleshooting.md).
 <summary><b>Development / contributing</b></summary>
 
 ```bash
-git clone https://github.com/xunhe730/ZotPilot.git
+git clone https://github.com/EconGeo/ZotPilot.git
 cd ZotPilot
 pip install -e ".[dev]"
 
@@ -553,8 +585,8 @@ npm install
   <br><br>
   <sub>Claude Code &middot; Codex &middot; OpenCode</sub>
   <br><br>
-  <a href="https://github.com/xunhe730/ZotPilot/issues">Report an issue</a> &middot;
-  <a href="https://github.com/xunhe730/ZotPilot/discussions">Discussions</a>
+  <a href="https://github.com/EconGeo/ZotPilot/issues">Report an issue</a> &middot;
+  <a href="https://github.com/EconGeo/ZotPilot/discussions">Discussions</a>
   <br>
   <sub>MIT License &copy; 2026 xunhe</sub>
 </div>

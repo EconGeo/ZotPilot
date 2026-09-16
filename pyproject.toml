@@ -31,9 +31,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xunhe730/ZotPilot"
-Repository = "https://github.com/xunhe730/ZotPilot"
-Issues = "https://github.com/xunhe730/ZotPilot/issues"
+Homepage = "https://github.com/EconGeo/ZotPilot"
+Repository = "https://github.com/EconGeo/ZotPilot"
+Issues = "https://github.com/EconGeo/ZotPilot/issues"
+"Upstream project" = "https://github.com/xunhe730/ZotPilot"
 
 [project.optional-dependencies]
 paddle = ["paddlepaddle>=3.0.0", "paddleocr>=3.0.0"]
