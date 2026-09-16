@@ -17,6 +17,7 @@ from zotpilot._platforms import (
     _get_current_version,
     _get_latest_pypi_version,
     _get_skill_dirs,
+    _get_vcs_install_url,
     _uv_bin_dir,
     deploy_skills,
 )
@@ -680,3 +681,116 @@ class TestWindowsLockError:
         captured = capsys.readouterr()
         assert "locked" not in captured.out
         assert "PermissionError" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# TestForkInstall — `upgrade` must not treat PyPI as this install's source
+# ---------------------------------------------------------------------------
+
+
+class TestForkInstall:
+    """A VCS install (e.g. `pip install git+https://github.com/EconGeo/ZotPilot.git`)
+    is not a PyPI install. PyPI publishes upstream, a different lineage, so its
+    version is not an upgrade and must never be offered or installed as one.
+    """
+
+    VCS_URL = "https://github.com/EconGeo/ZotPilot.git"
+
+    def _vcs_dist(self):
+        mock_dist = MagicMock()
+        mock_dist.read_text.return_value = json.dumps({
+            "url": self.VCS_URL,
+            "vcs_info": {"vcs": "git", "commit_id": "d12ab63"},
+        })
+        return mock_dist
+
+    def test_detect_git_install(self):
+        """direct_url.json with vcs_info → ('git', None)."""
+        with patch("importlib.metadata.distribution", return_value=self._vcs_dist()):
+            installer, uv_cmd = _detect_cli_installer()
+        assert installer == "git"
+        assert uv_cmd is None
+
+    def test_editable_takes_precedence_over_vcs(self):
+        """An editable checkout of a git clone is still 'editable'."""
+        mock_dist = MagicMock()
+        mock_dist.read_text.return_value = json.dumps({
+            "url": self.VCS_URL,
+            "dir_info": {"editable": True},
+            "vcs_info": {"vcs": "git", "commit_id": "d12ab63"},
+        })
+        with patch("importlib.metadata.distribution", return_value=mock_dist):
+            installer, _ = _detect_cli_installer()
+        assert installer == "editable"
+
+    def test_vcs_url_recovered(self):
+        """The recorded VCS URL is what a reinstall must use."""
+        with patch("importlib.metadata.distribution", return_value=self._vcs_dist()):
+            assert _get_vcs_install_url() == self.VCS_URL
+
+    def test_vcs_url_none_for_pypi_install(self):
+        mock_dist = MagicMock()
+        mock_dist.read_text.return_value = None
+        with patch("importlib.metadata.distribution", return_value=mock_dist):
+            assert _get_vcs_install_url() is None
+
+    def test_git_install_never_queries_pypi(self, capsys):
+        """The headline number must not come from PyPI on a fork install."""
+        args = _make_args(cli_only=True)
+        pypi = MagicMock(return_value="9.9.9")
+        with patch("zotpilot.cli._get_current_version", return_value="0.5.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", pypi), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("git", None)), \
+             patch("zotpilot.cli._get_vcs_install_url", return_value=self.VCS_URL), \
+             patch("zotpilot.cli.subprocess.run") as run:
+            cmd_update(args)
+        pypi.assert_not_called()
+        out = capsys.readouterr().out
+        assert "9.9.9" not in out
+        assert self.VCS_URL in out
+        # and it reinstalls from the recorded URL, never the PyPI name
+        cmd = run.call_args[0][0]
+        target = cmd[-1]
+        assert self.VCS_URL in target
+        assert target != "zotpilot"
+        assert "--force-reinstall" in cmd
+
+    def test_editable_install_never_queries_pypi(self, capsys):
+        """A dev checkout is not a PyPI install either."""
+        args = _make_args(cli_only=True)
+        pypi = MagicMock(return_value="9.9.9")
+        with patch("zotpilot.cli._get_current_version", return_value="0.5.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", pypi), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("editable", None)), \
+             patch("zotpilot.cli._get_vcs_install_url", return_value=None), \
+             patch("zotpilot.cli._get_skill_dirs", return_value=[]):
+            cmd_update(args)
+        pypi.assert_not_called()
+        assert "9.9.9" not in capsys.readouterr().out
+
+    def test_check_on_git_install_offers_no_upgrade(self, capsys):
+        """`--check` on a fork install must not print an upgrade path to PyPI."""
+        args = _make_args(check=True)
+        with patch("zotpilot.cli._get_current_version", return_value="0.5.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", return_value="0.5.3"), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("git", None)), \
+             patch("zotpilot.cli._get_vcs_install_url", return_value=self.VCS_URL), \
+             patch("zotpilot.cli.subprocess.run") as run:
+            result = cmd_update(args)
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Update available" not in out
+        assert "0.5.3" not in out
+        assert self.VCS_URL in out
+        run.assert_not_called()
+
+    def test_pypi_install_still_compares_and_upgrades(self, capsys):
+        """The PyPI path is unchanged for an actual PyPI install."""
+        args = _make_args(check=True)
+        with patch("zotpilot.cli._get_current_version", return_value="0.5.0"), \
+             patch("zotpilot.cli._get_latest_pypi_version", return_value="0.5.3"), \
+             patch("zotpilot.cli._detect_cli_installer", return_value=("pip", None)), \
+             patch("zotpilot.cli._get_vcs_install_url", return_value=None):
+            result = cmd_update(args)
+        assert result == 0
+        assert "Update available: 0.5.0 → 0.5.3" in capsys.readouterr().out
