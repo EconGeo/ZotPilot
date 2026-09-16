@@ -12,8 +12,23 @@ description: >
 
 ## Steps
 1. Check installation: `python scripts/run.py status --json` or `uv run zotpilot status`
-2. If not installed: `pip install zotpilot` or `uv tool install zotpilot`
-3. If installed but needing updates (Upgrade workflow): run `zotpilot upgrade`
+2. If not installed, install **this fork from GitHub**, ideally into a dedicated
+   environment (`micromamba create -n zotpilot python=3.12 -c conda-forge`):
+   `pip install git+https://github.com/EconGeo/ZotPilot.git`
+
+   **Never `pip install zotpilot` or `uv tool install zotpilot`.** That name on PyPI is
+   upstream `xunhe730/ZotPilot` — a different lineage, not a newer release of this fork. It
+   lacks the Ollama embedding provider, multi-library indexing, token-aware chunking,
+   ChromaDB batching, `delete_note` and BBT 7 support, and its `setup` takes flags this fork
+   does not implement, so these skills break against it.
+3. To update, re-run the fork install:
+   `pip install --upgrade --force-reinstall git+https://github.com/EconGeo/ZotPilot.git`
+   (dev checkout: `git pull` — an editable install needs nothing else.)
+
+   **Do not run `zotpilot upgrade` on a fork install.** It resolves "latest" from PyPI, so
+   it reports an upgrade to upstream against a version that is not newer, and on a
+   non-editable install it then runs `pip install --upgrade zotpilot` and replaces this fork
+   with upstream. A version gap against PyPI is expected here, not a defect.
 4. **Provider Selection**: Determine the user's preferred embedding platform.
    - **gemini**: Requires Google API key. Paid, but provides high-quality embeddings.
    - **dashscope**: Aliyun service. Preferred for Chinese users.
