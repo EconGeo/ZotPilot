@@ -56,7 +56,7 @@ packages = ["src/zotpilot"]
 [tool.hatch.build]
 include = [
     "src/zotpilot/**/*.py",
-    "src/zotpilot/skills/*.md",
+    "src/zotpilot/skills/**/*.md",
     "references/*.md",
     "src/zotpilot/data/**/*",
     "src/zotpilot/py.typed",

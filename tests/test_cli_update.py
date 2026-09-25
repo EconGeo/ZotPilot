@@ -373,6 +373,102 @@ class TestDeploySkills:
         finally:
             self._restore_platforms(orig)
 
+    def _source_with_references(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        """A skill file plus a sibling ``<stem>/references/`` directory."""
+        source = tmp_path / "source"
+        source.mkdir()
+        skill_file = source / "ztp-tutor.md"
+        skill_file.write_text("---\nname: ztp-tutor\n---\nRead `references/spec.md`.\n")
+        ref_dir = source / "ztp-tutor" / "references"
+        ref_dir.mkdir(parents=True)
+        (ref_dir / "spec.md").write_text("# spec v1\n")
+        return source, skill_file, ref_dir
+
+    def _codex_platforms(self, skills_root: Path) -> dict:
+        return {
+            "codex": {
+                "tier": 1,
+                "binary": "codex",
+                "label": "Codex CLI",
+                "skills_dir": str(skills_root),
+            },
+        }
+
+    def test_deploys_reference_files_next_to_skill_md(self, tmp_path):
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        _, skill_file, _ = self._source_with_references(tmp_path)
+
+        orig = self._patch_platforms(self._codex_platforms(skills_root))
+        try:
+            with patch("zotpilot._platforms._skill_source_files", return_value=[skill_file]):
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+        finally:
+            self._restore_platforms(orig)
+
+        target = skills_root / "ztp-tutor"
+        assert (target / "SKILL.md").exists()
+        assert (target / "references" / "spec.md").read_text() == "# spec v1\n"
+        marker = json.loads((target / ".zotpilot-version.json").read_text())
+        assert set(marker["skill_hashes"]) == {"ztp-tutor.md", "references/spec.md"}
+
+    def test_redeploys_when_only_a_reference_file_changes(self, tmp_path):
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        _, skill_file, ref_dir = self._source_with_references(tmp_path)
+
+        orig = self._patch_platforms(self._codex_platforms(skills_root))
+        try:
+            with patch("zotpilot._platforms._skill_source_files", return_value=[skill_file]):
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+                deployed_ref = skills_root / "ztp-tutor" / "references" / "spec.md"
+                assert deployed_ref.read_text() == "# spec v1\n"
+
+                (ref_dir / "spec.md").write_text("# spec v2\n")
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+                assert deployed_ref.read_text() == "# spec v2\n"
+        finally:
+            self._restore_platforms(orig)
+
+    def test_redeploy_removes_reference_files_the_package_no_longer_ships(self, tmp_path):
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        _, skill_file, ref_dir = self._source_with_references(tmp_path)
+        (ref_dir / "old.md").write_text("# retired\n")
+
+        orig = self._patch_platforms(self._codex_platforms(skills_root))
+        try:
+            with patch("zotpilot._platforms._skill_source_files", return_value=[skill_file]):
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+                assert (skills_root / "ztp-tutor" / "references" / "old.md").exists()
+
+                (ref_dir / "old.md").unlink()
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+                assert not (skills_root / "ztp-tutor" / "references" / "old.md").exists()
+                assert (skills_root / "ztp-tutor" / "references" / "spec.md").exists()
+        finally:
+            self._restore_platforms(orig)
+
+    def test_skill_state_reports_drift_when_a_deployed_reference_is_missing(self, tmp_path):
+        from zotpilot._platforms import _skill_state_for_platform
+
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        _, skill_file, _ = self._source_with_references(tmp_path)
+
+        orig = self._patch_platforms(self._codex_platforms(skills_root))
+        try:
+            with patch("zotpilot._platforms._skill_source_files", return_value=[skill_file]):
+                assert deploy_skills(platforms=["codex"]) == {"codex": True}
+                _, ok = _skill_state_for_platform("codex")
+                assert ok is True
+
+                (skills_root / "ztp-tutor" / "references" / "spec.md").unlink()
+                _, ok = _skill_state_for_platform("codex")
+                assert ok is False
+        finally:
+            self._restore_platforms(orig)
+
 
 # ---------------------------------------------------------------------------
 # TestCmdUpdate

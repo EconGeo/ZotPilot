@@ -416,13 +416,14 @@ def _skill_state_for_platform(plat: str) -> tuple[tuple[str, ...], bool]:
         target = base / _skill_name_for_file(source)
         deployed.append(str(target))
         marker = _read_version_marker(target)
-        expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-        if not target.exists() or not (target / "SKILL.md").exists():
+        bundle = _skill_bundle(source)
+        if not all(_deployed_path_for(target, key).is_file() for key in bundle):
             all_ok = False
             continue
         deployed_hashes = (marker or {}).get("skill_hashes", {})
-        if deployed_hashes.get(source.name) != expected_hash:
-            all_ok = False
+        for key, expected in _skill_hashes([source]).items():
+            if deployed_hashes.get(key) != expected:
+                all_ok = False
     return tuple(deployed), all_ok
 
 
@@ -659,6 +660,42 @@ def _skill_name_for_file(skill_file: Path) -> str:
     return skill_file.stem
 
 
+_REFERENCES_DIR = "references"
+
+
+def _skill_bundle(skill_file: Path) -> dict[str, Path]:
+    """Map each file a skill deploys to its source, keyed by hash-marker name.
+
+    A skill is its ``<name>.md`` file plus, optionally, a sibling
+    ``<name>/references/*.md`` directory the skill text reads step by step.
+    The skill file keeps its historical marker key (``ztp-research.md``) so
+    markers written before references existed still verify; reference files
+    are keyed by their deployed relative path (``references/spec.md``).
+    """
+    bundle = {skill_file.name: skill_file}
+    ref_dir = skill_file.with_suffix("") / _REFERENCES_DIR
+    if ref_dir.is_dir():
+        for ref in sorted(ref_dir.glob("*.md")):
+            if ref.is_file():
+                bundle[f"{_REFERENCES_DIR}/{ref.name}"] = ref
+    return bundle
+
+
+def _skill_hashes(skill_files: list[Path]) -> dict[str, str]:
+    return {
+        key: hashlib.sha256(source.read_bytes()).hexdigest()
+        for skill_file in skill_files
+        for key, source in _skill_bundle(skill_file).items()
+    }
+
+
+def _deployed_path_for(target: Path, key: str) -> Path:
+    """Where a bundle entry lands inside its deployed skill directory."""
+    if key.startswith(f"{_REFERENCES_DIR}/"):
+        return target / key
+    return target / "SKILL.md"
+
+
 def _skill_targets_for_platform(
     _plat: str,
     skills_dir: Path,
@@ -698,10 +735,7 @@ def _write_version_marker(target: Path, version: str, skill_files: list[Path]) -
         "version": version,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
         "skills": [path.name for path in skill_files],
-        "skill_hashes": {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in skill_files
-        },
+        "skill_hashes": _skill_hashes(skill_files),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -748,11 +782,7 @@ def _should_skip_deploy(target: Path, version: str, skill_files: list[Path]) -> 
     target_version = str(marker.get("version", "")).strip()
     if not target_version:
         return False, "deploy"
-    expected_hashes = {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in skill_files
-    }
-    if marker.get("skill_hashes") != expected_hashes:
+    if marker.get("skill_hashes") != _skill_hashes(skill_files):
         return False, "refresh-content"
     if target_version == version:
         return True, "up-to-date"
@@ -766,6 +796,9 @@ def deploy_skills(platforms: list[str] | None = None) -> dict[str, bool]:
 
     Each skill file becomes its own directory with a ``SKILL.md`` inside:
         ``~/.claude/skills/ztp-research/SKILL.md``
+    A skill that ships a sibling ``<name>/references/`` directory gets it
+    copied alongside:
+        ``~/.claude/skills/ztp-tutor/references/annotation-spec.md``
 
     On upgrade from v0.4.x bundle layout, the legacy ``zotpilot/`` bundle
     directory (or symlink) is automatically migrated first.
@@ -810,11 +843,16 @@ def deploy_skills(platforms: list[str] | None = None) -> dict[str, bool]:
                 continue
 
             target.mkdir(parents=True, exist_ok=True)
-            # Clean existing .md files before writing new ones
+            # Clean existing .md files and references/ before writing new ones,
+            # so a reference file the package no longer ships does not linger.
             for existing_md in target.glob("*.md"):
                 existing_md.unlink()
+            shutil.rmtree(target / _REFERENCES_DIR, ignore_errors=True)
             for skill_file in source_files:
-                shutil.copy2(skill_file, target / "SKILL.md")
+                for key, source in _skill_bundle(skill_file).items():
+                    dest = _deployed_path_for(target, key)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, dest)
             _write_version_marker(target, __version__, source_files)
             print(f"  {info['label']}: deployed {target.name} to {target}")
 
