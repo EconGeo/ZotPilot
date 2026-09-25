@@ -1,4 +1,4 @@
-"""Tests for ZotPilot doctor checks under the config-backed key model."""
+"""Tests for ZotPilot doctor checks under the secrets-file key model."""
 
 from __future__ import annotations
 
@@ -9,14 +9,18 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from zotpilot.doctor import (
     CheckResult,
     _check_chromadb_index,
     _check_config_exists,
     _check_config_permissions,
+    _check_config_secrets,
     _check_embedding_api_key,
     _check_python_version,
     _check_secret_backend,
+    _check_secrets_file,
     _check_write_connectivity,
     _check_zotero_data,
     _check_zotero_web_api,
@@ -235,3 +239,59 @@ class TestCheckConfigPermissions:
         assert result.status in ("pass", "warn")  # warn only for permissions, not for "contains API keys"
         assert "contains API keys" not in result.message
 
+
+
+class TestCheckConfigSecrets:
+    def test_fails_when_config_json_still_holds_a_key(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"zotero_api_key": "leaked"}))
+
+        result = _check_config_secrets(config_file)
+
+        assert result.status == "fail"
+        assert "zotero_api_key" in result.message
+        assert "migrate-secrets" in result.message
+        assert "leaked" not in result.message
+
+    def test_passes_on_a_clean_config(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"chunk_size": 400}))
+
+        assert _check_config_secrets(config_file).status == "pass"
+
+    def test_passes_when_there_is_no_config_file(self, tmp_path):
+        assert _check_config_secrets(tmp_path / "absent.json").status == "pass"
+
+
+class TestCheckSecretsFile:
+    def test_warns_when_the_file_does_not_exist(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(tmp_path / "absent.env"))
+
+        result = _check_secrets_file({})
+
+        assert result.status == "warn"
+        assert "absent.env" in result.message
+
+    def test_passes_and_names_the_fields_it_supplies(self, tmp_path, monkeypatch):
+        env_path = tmp_path / "secrets.env"
+        env_path.write_text('export ZOTERO_API_KEY="abc"\n')
+        env_path.chmod(0o600)
+        monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(env_path))
+
+        result = _check_secrets_file({"zotero_api_key": "secrets-env"})
+
+        assert result.status == "pass"
+        assert "zotero_api_key" in result.message
+        assert "abc" not in result.message
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_fails_on_a_world_readable_file(self, tmp_path, monkeypatch):
+        env_path = tmp_path / "secrets.env"
+        env_path.write_text('export ZOTERO_API_KEY="abc"\n')
+        env_path.chmod(0o644)
+        monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(env_path))
+
+        result = _check_secrets_file({})
+
+        assert result.status == "fail"
+        assert "chmod 600" in result.message

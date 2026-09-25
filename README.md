@@ -142,21 +142,25 @@ zotpilot setup --non-interactive --provider gemini   # 或 dashscope / local
 <details>
 <summary><b>API Key 与环境变量</b></summary>
 
-配置模型分两层：
+设置与密钥分别存放在两个文件中：
 
-- `zotpilot setup` 写共享本地配置到 macOS / Linux 的 `~/.config/zotpilot/config.json`，或 Windows 的 `%APPDATA%\zotpilot\config.json`，并自动部署 skills / 注册 MCP
-- `zotpilot config set` 管理共享配置；API key 也会写入同一个 `config.json`
+- **设置** — `zotpilot setup` 写共享本地配置到 macOS / Linux 的 `~/.config/zotpilot/config.json`，或 Windows 的 `%APPDATA%\zotpilot\config.json`，并自动部署 skills / 注册 MCP；用 `zotpilot config set` 管理。
+- **密钥** — 所有 API key 只存放在共享 shell secrets 文件 `~/.secrets.env`（`chmod 600`），每行一条 `export NAME="value"`。`zotpilot config set <field> <key>` 会就地修改该文件，不影响其他 export 行。可用 `ZOTPILOT_ENV_FILE` 指定其他路径。
 - `zotpilot upgrade` 升级 CLI，并刷新 packaged skills / 同步 MCP runtime
-- API key 不写入 Claude / Codex / OpenCode 的客户端配置
+- API key 不写入 Claude / Codex / OpenCode 的客户端配置，也不再写入 `config.json`
 
-环境变量仍可作为临时 override，优先级高于 `config.json`：
+ZotPilot **自己读取 `~/.secrets.env`**，不依赖环境继承。GUI 启动的 MCP 客户端会以最小环境启动 server，不会加载 shell 启动文件，仅靠 shell export 的 key 对它是不可见的。
+
+真正的环境变量仍然优先，可用于临时 override：
 
 ```bash
 export GEMINI_API_KEY=<your-key>           # 或 DASHSCOPE_API_KEY
 export ANTHROPIC_API_KEY=<your-key>        # 可选：复杂表格视觉提取
 ```
 
-`config.json` 可能包含 API key。不要提交、公开粘贴或同步到不可信位置；共享机器上优先用交互式 `zotpilot setup` 输入密钥，避免把 key 留在 shell history。
+优先级由低到高：`config.json`（legacy）→ 系统钥匙串（legacy）→ `~/.secrets.env` → 进程环境变量 → CLI 参数。
+
+请保持 `~/.secrets.env` 权限为 `0600`；若文件对同组或其他用户可读，ZotPilot 会拒绝从中读取密钥。共享机器上优先用交互式 `zotpilot setup` 输入密钥，避免把 key 留在 shell history。
 
 推荐顺序：
 
@@ -221,11 +225,13 @@ zotpilot setup
 zotpilot doctor
 ```
 
-迁移旧的客户端内嵌 secret：
+把旧位置的 secret（客户端配置内嵌、遗留在 `config.json`、或系统钥匙串）迁移到 `~/.secrets.env`：
 
 ```bash
 zotpilot config migrate-secrets
 ```
+
+迁移同时会从 `config.json` 中删除这些 key。只要还有残留，`zotpilot doctor` 就会报 fail。
 
 </details>
 
@@ -329,11 +335,13 @@ PyPI 安装的 zotpilot（wheel 内含 skills + references）
 
 # 配置 / 索引位置
 # macOS / Linux
-~/.config/zotpilot/config.json
+~/.config/zotpilot/config.json     # 设置，不含 API key
+~/.secrets.env                     # API key（chmod 600）
 ~/.local/share/zotpilot/chroma/
 
 # Windows
-%APPDATA%\zotpilot\config.json
+%APPDATA%\zotpilot\config.json     # 设置，不含 API key
+%USERPROFILE%\.secrets.env          # API key
 %APPDATA%\zotpilot\chroma\
 ```
 
@@ -360,7 +368,7 @@ zotpilot upgrade
 | `--cli-only` | 只升级 CLI 包 |
 | `--skill-only` | 只刷新 skills 和 runtime 注册 |
 | `--re-register` | 即使没有 drift，也强制刷新客户端注册 |
-| `--migrate-secrets` | 同步 runtime 前，迁移旧客户端内嵌 secrets |
+| `--migrate-secrets` | 同步 runtime 前，把旧 secrets 迁移到 `~/.secrets.env` |
 
 </details>
 

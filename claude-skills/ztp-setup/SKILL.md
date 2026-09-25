@@ -36,11 +36,35 @@ description: >
    - **dashscope**: Aliyun service. Preferred for Chinese users.
    - **local**: No API key required, completely private, but indexing runs slowly.
    - **none**: Not accepted by `zotpilot setup --provider`; use `zotpilot config set embedding_provider none` only when intentionally disabling vector indexing.
-5. **API Key Setup**: Prefer interactive `zotpilot setup` on shared machines. API keys are stored in `~/.config/zotpilot/config.json`; do not paste or commit that file.
+5. **API Key Setup**: every key lives in **one** file — the shared shell secrets file
+   `~/.secrets.env` (`chmod 600`), as `export NAME="value"`. ZotPilot reads that file
+   directly, so a key works even when the MCP server is launched by a GUI client that
+   never sourced your shell startup files.
+
+   - Write a key with `zotpilot config set zotero_api_key <key>` (it edits `~/.secrets.env`
+     in place, leaving the other lines alone), or add the `export` line by hand.
+   - Point ZotPilot at a different file with `ZOTPILOT_ENV_FILE`.
+   - A real environment variable still overrides the file, for one-off runs.
+   - **Keys are never written to `~/.config/zotpilot/config.json`.** If an older install
+     left one there, `zotpilot config migrate-secrets` moves it to `~/.secrets.env` and
+     strips it from the config; `zotpilot doctor` fails while any remain.
+   - Resolution order, lowest to highest: `config.json` (legacy) → OS keychain (legacy) →
+     `~/.secrets.env` → process environment → CLI flag.
 6. Configure: `zotpilot setup --non-interactive --provider [gemini|dashscope|local]`
 7. MCP registration and skill deployment are included in `zotpilot setup`. Advanced repair only: `zotpilot install` (alias: `zotpilot register`).
+
+   **Registration is client-level, not per-project.** ZotPilot registers itself once per
+   client — `claude mcp add --scope user` for Claude Code, `codex mcp add` for Codex,
+   `~/.config/opencode/opencode.json` for OpenCode — so one install serves every project
+   against the one Zotero library. It does **not** write a project `.mcp.json`, and no
+   flag asks it to. If a project needs its own entry, add it there by hand.
 8. Initial Index: `zotpilot index --limit 20` (first-time quick index)
 9. Verify health: `zotpilot doctor`
 
 ## Troubleshooting
 - If Zotero is not natively detected at standard paths during setup, instruct the user to explicitly define it via the flag: `--zotero-dir /path/to/zotero/data`
+- Write operations disabled although the key is exported: check `zotpilot doctor`. A GUI-launched
+  MCP server has a minimal environment, so the key must be in `~/.secrets.env` (which ZotPilot
+  reads itself), not only exported in your terminal.
+- `secrets_file` check failing: the file must be owner-only — `chmod 600 ~/.secrets.env`. ZotPilot
+  refuses to read credentials from a group- or world-readable file.
