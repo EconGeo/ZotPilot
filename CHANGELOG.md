@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **API keys move to `~/.secrets.env` / API key 统一存放在 `~/.secrets.env`** —— 密钥不再写入
+  `~/.config/zotpilot/config.json`。所有 key 只保存在共享的 shell secrets 文件
+  `~/.secrets.env`（`chmod 600`，每行 `export NAME="value"`），由 ZotPilot **直接读取**——
+  GUI 启动的 MCP 客户端会以最小环境启动 server，不会加载 shell 启动文件，因此不能依赖环境继承。
+  `zotpilot config set <secret> <value>` 就地修改该文件（保留其他行与注释，写前自动备份）；
+  `zotpilot config migrate-secrets` 把遗留在 `config.json`、系统钥匙串或客户端配置中的 key
+  迁移过去并从 `config.json` 删除；`zotpilot doctor` 新增 `config_secrets` 与 `secrets_file`
+  两项检查。优先级由低到高：`config.json`（legacy）→ 钥匙串（legacy）→ `~/.secrets.env` →
+  进程环境变量 → CLI 参数。可用 `ZOTPILOT_ENV_FILE` 指定其他路径；`SEMANTIC_SCHOLAR_API_KEY`
+  现作为 `S2_API_KEY` 的别名被接受。
+
+  Keys are no longer written to `config.json`. They live only in `~/.secrets.env`, which
+  ZotPilot reads directly — a GUI-launched MCP client gives the server a minimal
+  environment that never sourced the user's shell startup files, so inheritance cannot be
+  relied on. `config set` edits that file in place, `config migrate-secrets` moves legacy
+  keys there and strips them from `config.json`, and `doctor` gained `config_secrets` and
+  `secrets_file` checks.
+
+### Fixed
+
+- **Documentation: MCP registration scope.** `ztp-setup` registers ZotPilot **once per
+  client at user scope** (`claude mcp add --scope user`, `codex mcp add`,
+  `~/.config/opencode/opencode.json`). It has never written a project `.mcp.json` and no
+  flag requests one; the skill and the `new-project-ztp` research skill said otherwise.
+  Both now state the actual behaviour and show the manual entry for a project that needs
+  its own.
+
 ### Added
 
 - **`ztp-tutor` 论文导读 / Deep Reading Guide** —— 新增单篇论文深度导读功能。`/ztp-tutor <标题>` 模糊匹配本地 Zotero 文献后，由 LLM 通读全文，将五维彩色高亮（核心论点 / 关键概念 / 实证证据 / 让步反驳 / 方法论）、逐句中文批注、图表与公式标注，以及第 1 页的论证结构概览便签，直接写入 Zotero 存储的 PDF，可在 Zotero 阅读器中原地打开查看，全程本地。功能会按 `~/.config/zotpilot/ZOTPILOT.md` 中的"阅读画像"自适应调整批注密度与讲解层次（如英文偏弱时补充术语解释与长难句拆解），并尊重 PDF 中已有的人工批注（不重复、不覆盖）。每次写入前自动生成 `.ztpbak` 备份，经独立文件写入、多重校验与原子替换保证原文永不损坏、失败即回滚；跨 macOS / Linux / Windows 均经兼容性加固。配套提供声明式 skill 与 MCP 工具 `get_paper_for_tutor` / `annotate_pdf` / `save_reading_persona`。首次启用后建议在真实 Zotero 阅读器中目视确认中文便签与五色高亮渲染正常。

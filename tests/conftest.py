@@ -14,6 +14,13 @@ os.environ["ZOTPILOT_SECRET_BACKEND"] = "local-file"
 os.environ["ZOTPILOT_LOCAL_SECRETS_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="zotpilot-test-secrets-"), "secrets.json"
 )
+# Point the shared shell secrets file at an ephemeral path that does not
+# exist. Without this, credential resolution would read the developer's real
+# ~/.secrets.env and tests would pass or fail depending on whose machine they
+# run on — and a test that writes a secret would edit that real file.
+os.environ["ZOTPILOT_ENV_FILE"] = os.path.join(
+    tempfile.mkdtemp(prefix="zotpilot-test-envfile-"), "secrets.env"
+)
 
 from unittest.mock import MagicMock
 
@@ -35,6 +42,17 @@ def pytest_addoption(parser):
         default=False,
         help="run external benchmark tests",
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_secrets_env_file(tmp_path, monkeypatch):
+    """Give every test its own (initially absent) shared secrets file.
+
+    The module-level ZOTPILOT_ENV_FILE above is one path for the whole
+    session, so a test that *writes* a secret would leak it into every later
+    test's credential resolution. Re-pointing it per test keeps writes local.
+    """
+    monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(tmp_path / "isolated-secrets.env"))
 
 
 def pytest_collection_modifyitems(config, items):

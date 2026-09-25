@@ -161,7 +161,8 @@ class TestRuntimeResolution:
 
 
 class TestConfigSave:
-    def test_save_persists_api_keys(self, tmp_path, monkeypatch):
+    def test_save_omits_api_keys(self, tmp_path, monkeypatch):
+        """Keys belong in ~/.secrets.env; config.json must never receive one."""
         _use_local_secrets(monkeypatch, tmp_path)
         cfg = Config.load(path=tmp_path / "nonexistent.json")
         cfg.gemini_api_key = "secret-gemini"
@@ -171,8 +172,9 @@ class TestConfigSave:
         cfg.save(path=save_path)
 
         saved_data = json.loads(save_path.read_text())
-        assert saved_data["gemini_api_key"] == "secret-gemini"
-        assert saved_data["zotero_api_key"] == "secret-zotero"
+        assert "gemini_api_key" not in saved_data
+        assert "zotero_api_key" not in saved_data
+        # zotero_user_id is an account number, not a credential — it stays.
         assert saved_data["zotero_user_id"] == "12345"
 
     def test_save_file_permissions(self, tmp_path, monkeypatch):

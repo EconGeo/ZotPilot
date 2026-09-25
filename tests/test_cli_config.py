@@ -1,4 +1,4 @@
-"""Tests for `zotpilot config` subcommands under the config-backed key model."""
+"""Tests for `zotpilot config` subcommands under the secrets-file key model."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from zotpilot.cli import _coerce_value, _config_set, _mask_secret
 from zotpilot.runtime_settings import resolve_runtime_settings
+from zotpilot.secrets_env import env_file_path, load_env_file
 
 
 def _use_local_secrets(monkeypatch, tmp_path: Path) -> Path:
@@ -82,16 +83,31 @@ class TestConfigSet:
 
 
 class TestConfigCommand:
-    def test_secret_fields_store_in_config_json(self, tmp_path, monkeypatch, capsys):
+    def test_secret_fields_store_in_the_secrets_file(self, tmp_path, monkeypatch, capsys):
         _use_local_secrets(monkeypatch, tmp_path)
         cfg_path = tmp_path / "config.json"
         out = _run_config(["set", "zotero_api_key", "secret-zot"], cfg_path, monkeypatch, capsys)
         assert out.returncode == 0
-        assert "config.json" in out.out.lower()
+        assert str(env_file_path()) in out.out
 
+        assert load_env_file()["ZOTERO_API_KEY"] == "secret-zot"
         resolved = resolve_runtime_settings(cfg_path)
         assert resolved.config.zotero_api_key == "secret-zot"
-        assert json.loads(cfg_path.read_text())["zotero_api_key"] == "secret-zot"
+        assert resolved.sources["zotero_api_key"] == "secrets-env"
+        assert not cfg_path.exists() or "zotero_api_key" not in json.loads(cfg_path.read_text())
+
+    def test_setting_a_secret_clears_a_stale_config_json_copy(self, tmp_path, monkeypatch, capsys):
+        _use_local_secrets(monkeypatch, tmp_path)
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({"zotero_api_key": "stale", "chunk_size": 321}))
+
+        out = _run_config(["set", "zotero_api_key", "fresh"], cfg_path, monkeypatch, capsys)
+
+        assert out.returncode == 0
+        data = json.loads(cfg_path.read_text())
+        assert "zotero_api_key" not in data
+        assert data["chunk_size"] == 321
+        assert load_env_file()["ZOTERO_API_KEY"] == "fresh"
 
     def test_non_secret_fields_persist_to_config_json(self, tmp_path, monkeypatch, capsys):
         _use_local_secrets(monkeypatch, tmp_path)
@@ -115,7 +131,7 @@ class TestConfigCommand:
         _run_config(["set", "zotero_api_key", "secret-zot"], cfg_path, monkeypatch, capsys)
         out = _run_config(["unset", "zotero_api_key"], cfg_path, monkeypatch, capsys)
         assert out.returncode == 0
-        assert "zotero_api_key" not in json.loads(cfg_path.read_text())
+        assert "ZOTERO_API_KEY" not in load_env_file()
         resolved = resolve_runtime_settings(cfg_path)
         assert resolved.config.zotero_api_key is None
 
@@ -133,7 +149,7 @@ class TestConfigCommand:
         resolved = resolve_runtime_settings(cfg_path)
         assert resolved.config.gemini_api_key is None
 
-    def test_migrate_secrets_defaults_to_config_json(self, tmp_path, monkeypatch, capsys):
+    def test_migrate_secrets_defaults_to_the_secrets_file(self, tmp_path, monkeypatch, capsys):
         from zotpilot.secret_store import set_secret
 
         _use_local_secrets(monkeypatch, tmp_path)
@@ -143,8 +159,8 @@ class TestConfigCommand:
         out = _run_config(["migrate-secrets"], cfg_path, monkeypatch, capsys)
 
         assert out.returncode == 0
-        data = json.loads(cfg_path.read_text())
-        assert data["gemini_api_key"] == "legacy-gemini"
+        assert load_env_file()["GEMINI_API_KEY"] == "legacy-gemini"
+        assert not cfg_path.exists() or "gemini_api_key" not in json.loads(cfg_path.read_text())
 
     def test_migrate_secrets_does_not_capture_runtime_env(self, tmp_path, monkeypatch, capsys):
         _use_local_secrets(monkeypatch, tmp_path)
@@ -154,7 +170,7 @@ class TestConfigCommand:
         out = _run_config(["migrate-secrets"], cfg_path, monkeypatch, capsys)
 
         assert out.returncode == 0
-        assert not cfg_path.exists()
+        assert "GEMINI_API_KEY" not in load_env_file()
 
     def test_status_json_includes_new_runtime_fields(self, tmp_path, monkeypatch, capsys):
         _use_local_secrets(monkeypatch, tmp_path)

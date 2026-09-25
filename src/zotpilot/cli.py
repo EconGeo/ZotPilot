@@ -16,10 +16,11 @@ from ._platforms import (
     _get_skill_dirs,  # noqa: F401 — re-exported for test patching compatibility
     _get_vcs_install_url,
 )
-from .config import Config, _default_config_dir
-from .credential_migration import migrate_secrets
-from .runtime_settings import resolve_runtime_config, resolve_runtime_settings
+from .config import SECRET_FIELDS, Config, _default_config_dir
+from .credential_migration import TARGET_ENV_FILE, migrate_secrets
+from .runtime_settings import FIELD_TO_ENV, resolve_runtime_config, resolve_runtime_settings
 from .secret_store import SecretStoreError, delete_secret
+from .secrets_env import describe_env_file, env_file_path, set_env_secret, unset_env_secret
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +41,21 @@ def _split_validate_errors(errors: list[str]) -> tuple[list[str], list[str]]:
     return blocking, warnings
 
 
+def _store_secret(field: str, value: str) -> Path:
+    """Persist one credential to the shared secrets file and report where."""
+    return set_env_secret(FIELD_TO_ENV[field], value)
+
+
 def _import_register_secret_overrides(args, config_path: Path) -> bool:
     imported_any = False
     if getattr(args, "gemini_key", None):
-        _config_set("gemini_api_key", args.gemini_key, config_path)
+        _store_secret("gemini_api_key", args.gemini_key)
         imported_any = True
     if getattr(args, "dashscope_key", None):
-        _config_set("dashscope_api_key", args.dashscope_key, config_path)
+        _store_secret("dashscope_api_key", args.dashscope_key)
         imported_any = True
     if getattr(args, "zotero_api_key", None):
-        _config_set("zotero_api_key", args.zotero_api_key, config_path)
+        _store_secret("zotero_api_key", args.zotero_api_key)
         imported_any = True
     if getattr(args, "zotero_user_id", None):
         if not args.zotero_user_id.isdigit():
@@ -245,14 +251,35 @@ def cmd_setup(args):
     from .config import Config as _Config
 
     base_config = _Config.load(config_path)
+
+    # Anything already sitting in config.json moves to the secrets file before
+    # the config is rewritten, because Config.save() no longer persists keys.
+    try:
+        migrate_secrets(config_path=config_path, target=TARGET_ENV_FILE)
+    except (SecretStoreError, RuntimeError) as exc:
+        print(f"  WARNING: could not migrate existing keys out of config.json: {exc}", file=sys.stderr)
+
+    secrets_file = env_file_path()
+    stored_secrets: list[str] = []
+    for field_name, collected in (
+        ("gemini_api_key", gemini_api_key),
+        ("dashscope_api_key", dashscope_api_key),
+        ("zotero_api_key", zotero_api_key),
+    ):
+        if not collected:
+            continue
+        try:
+            secrets_file = _store_secret(field_name, collected)
+            stored_secrets.append(FIELD_TO_ENV[field_name])
+        except RuntimeError as exc:
+            print(f"  ERROR: could not write {FIELD_TO_ENV[field_name]} to {secrets_file}: {exc}",
+                  file=sys.stderr)
+
     config = replace(
         base_config,
         zotero_data_dir=zotero_path,
         chroma_db_path=chroma_db_path,
         embedding_provider=embedding_provider,
-        gemini_api_key=gemini_api_key or base_config.gemini_api_key,
-        dashscope_api_key=dashscope_api_key or base_config.dashscope_api_key,
-        zotero_api_key=zotero_api_key or base_config.zotero_api_key,
         zotero_user_id=zotero_user_id or base_config.zotero_user_id,
     )
     config.save(config_path)
@@ -267,34 +294,34 @@ def cmd_setup(args):
         print(f"Config written to: {config_path}")
         if registration_ok:
             print("Restart your AI agent.")
-        print(f"Shared config saved to {config_path}. API keys, when configured, are stored in this file.")
+        print(f"Shared config saved to {config_path} (no API keys are written there).")
+        print(f"API keys live in {secrets_file}, which ZotPilot reads directly.")
+        if stored_secrets:
+            print(f"  Stored: {', '.join(stored_secrets)}")
         # Tell user how to provide API keys
-        if embedding_provider == "gemini":
+        if embedding_provider == "gemini" and "GEMINI_API_KEY" not in stored_secrets:
             print("Set your API key via:")
-            print("  export GEMINI_API_KEY='<your-key>'")
-            print("  or: zotpilot config set gemini_api_key <key>")
-        elif embedding_provider == "dashscope":
+            print("  zotpilot config set gemini_api_key <key>")
+            print(f"  or add to {secrets_file}:  export GEMINI_API_KEY=\"<your-key>\"")
+        elif embedding_provider == "dashscope" and "DASHSCOPE_API_KEY" not in stored_secrets:
             print("Set your API key via:")
-            print("  export DASHSCOPE_API_KEY='<your-key>'")
-            print("  or: zotpilot config set dashscope_api_key <key>")
+            print("  zotpilot config set dashscope_api_key <key>")
+            print(f"  or add to {secrets_file}:  export DASHSCOPE_API_KEY=\"<your-key>\"")
         print("For Zotero write operations:")
         print("  zotpilot config set zotero_user_id <numeric-id>")
         print("  zotpilot config set zotero_api_key <your-key>")
     else:
         print(f"  Config written to: {config_path}")
 
-        import os as _os
-        if gemini_api_key and not _os.environ.get("GEMINI_API_KEY"):
-            masked = gemini_api_key[:4] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 8 else "****"
-            print("\n  NOTE: GEMINI_API_KEY was stored in config.json.")
-            print(f"    Masked value: {masked}")
-        if dashscope_api_key and not _os.environ.get("DASHSCOPE_API_KEY"):
-            masked = dashscope_api_key[:4] + "..." + dashscope_api_key[-4:] if len(dashscope_api_key) > 8 else "****"
-            print("\n  NOTE: DASHSCOPE_API_KEY was stored in config.json.")
-            print(f"    Masked value: {masked}")
-        if zotero_api_key and not _os.environ.get("ZOTERO_API_KEY"):
-            masked = zotero_api_key[:4] + "..." + zotero_api_key[-4:] if len(zotero_api_key) > 8 else "****"
-            print("\n  NOTE: ZOTERO_API_KEY was stored in config.json.")
+        for env_name, collected in (
+            ("GEMINI_API_KEY", gemini_api_key),
+            ("DASHSCOPE_API_KEY", dashscope_api_key),
+            ("ZOTERO_API_KEY", zotero_api_key),
+        ):
+            if not collected or env_name not in stored_secrets:
+                continue
+            masked = collected[:4] + "..." + collected[-4:] if len(collected) > 8 else "****"
+            print(f"\n  NOTE: {env_name} was stored in {secrets_file}, not in config.json.")
             print(f"    Masked value: {masked}")
 
         print("\n" + "=" * 40)
@@ -305,7 +332,7 @@ def cmd_setup(args):
             print("Restart your AI agent to load the new MCP config and skills.")
         else:
             print("Client registration failed. Run `zotpilot doctor` for details.")
-        print(f"Shared config lives in {config_path}. API keys, when configured, are stored in this file.")
+        print(f"Shared config lives in {config_path}; API keys live in {secrets_file}.")
 
     return 0 if registration_ok else 1
 
@@ -443,6 +470,12 @@ def cmd_status(args):
             "legacy_embedded_secret_platforms": deployment.get("legacy_embedded_secret_platforms", []),
             "credentials_source": resolved.sources,
             "runtime_config_path": str(resolved.runtime_config_path),
+            "secrets_file": str(resolved.env_file) if resolved.env_file else None,
+            "secrets_file_readable": resolved.env_file_readable,
+            "config_secrets_present": sorted(
+                field for field, source in resolved.sources.items()
+                if source == "config" and field in SECRET_FIELDS
+            ),
         }
         if deployment.get("deployment_warning"):
             result["warnings"].append(
@@ -480,6 +513,8 @@ def cmd_status(args):
     if config.embedding_provider == "dashscope":
         print(f"  DashScope endpoint:  {config.dashscope_embedding_endpoint}")
     print(f"  Legacy secret backend: {resolved.secret_backend}")
+    print(f"  Secrets file:       {resolved.env_file}"
+          f"{'' if resolved.env_file_readable else f' ({resolved.env_file_detail})'}")
     print(f"  Write ops ready:    {'yes' if (config.zotero_api_key and config.zotero_user_id) else 'no'}")
     print(f"  Embedding model:    {config.embedding_model}")
     print(f"  Embedding dims:     {config.embedding_dimensions}")
@@ -678,6 +713,16 @@ _ENV_TO_CONFIG = {
 }
 
 
+def _strip_config_secret(key: str, config_path: Path) -> bool:
+    """Drop one credential key from config.json. True if it was there."""
+    data = _read_raw_config(config_path)
+    if key not in data:
+        return False
+    data.pop(key, None)
+    _write_config_data(config_path, data)
+    return True
+
+
 def _read_raw_config(config_path: Path) -> dict:
     if not config_path.exists():
         return {}
@@ -724,11 +769,14 @@ def cmd_config(args):
                   f"Find your numeric ID at https://www.zotero.org/settings/keys")
         if key in _SENSITIVE_FIELDS:
             try:
-                _config_set(key, value, config_path)
-            except (ValueError, json.JSONDecodeError, RuntimeError) as e:
+                target_file = _store_secret(key, value)
+                stale = _strip_config_secret(key, config_path)
+            except (RuntimeError, OSError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
-            print(f"✓ Saved '{key}' to {config_path}")
+            print(f"✓ Saved '{FIELD_TO_ENV[key]}' to {target_file}")
+            if stale:
+                print(f"  Removed the stale copy of '{key}' from {config_path}")
             return 0
         try:
             _config_set(key, value, config_path)
@@ -772,6 +820,9 @@ def cmd_config(args):
                 continue
             src = resolved.sources.get(field, "unset")
             print(f"  {field}: {_mask_secret(str(val))} [{src}]")
+        info = describe_env_file()
+        status = "readable" if info.readable else (info.detail or "unusable")
+        print(f"Secrets file: {info.path} ({status})")
         env_overrides = {field: src for field, src in resolved.sources.items() if src == "env-override"}
         print("Active env overrides:")
         if not env_overrides:
@@ -785,14 +836,16 @@ def cmd_config(args):
         key = args.key
         if key in _SENSITIVE_FIELDS:
             try:
-                data = _read_raw_config(config_path)
-                data.pop(key, None)
-                _write_config_data(config_path, data)
+                _strip_config_secret(key, config_path)
+                removed_from_file = unset_env_secret(FIELD_TO_ENV[key])
                 delete_secret(key)
-                print(f"✓ Removed '{key}' from {config_path} and legacy secret backend")
-            except (json.JSONDecodeError, RuntimeError) as e:
+            except (json.JSONDecodeError, RuntimeError, OSError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
+            where = [str(config_path), "legacy secret backend"]
+            if removed_from_file:
+                where.insert(0, str(env_file_path()))
+            print(f"✓ Removed '{key}' from {', '.join(where)}")
             return 0
         cfg = Config.load(path=config_path)
         setattr(cfg, key, None)
@@ -805,16 +858,20 @@ def cmd_config(args):
             result = migrate_secrets(
                 config_path=config_path,
                 force=getattr(args, "force", False),
-                to_config=True,
+                target=getattr(args, "target", None) or TARGET_ENV_FILE,
             )
-        except SecretStoreError as exc:
+        except (SecretStoreError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        print("Secret migration complete.")
+        print(f"Secret migration complete (target: {result.target}).")
+        if result.env_file:
+            print(f"  Secrets file: {result.env_file}")
         if result.imported:
             print(f"  Imported: {', '.join(sorted(result.imported))}")
         if result.preserved:
             print(f"  Preserved existing target values: {', '.join(sorted(result.preserved))}")
+        if result.removed_from_config:
+            print(f"  Removed from {config_path}: {', '.join(sorted(result.removed_from_config))}")
         if result.config_updated:
             print("  Updated shared config with zotero_user_id")
         if result.re_registered_platforms:
@@ -1022,8 +1079,8 @@ def cmd_update(args):
 
         if getattr(args, "migrate_secrets", False):
             try:
-                migrate_secrets(config_path=config_path, force=False, to_config=True)
-                print("Legacy secrets migrated to config.json.")
+                result = migrate_secrets(config_path=config_path, force=False, target=TARGET_ENV_FILE)
+                print(f"Legacy secrets migrated to {result.env_file}.")
             except SecretStoreError as exc:
                 print(f"Secret migration failed: {exc}", file=sys.stderr)
                 errors.append("secret migration failed")
@@ -1230,8 +1287,17 @@ def main(argv: list[str] | None = None) -> int:
     cfg_unset.add_argument("key", help="Config field name")
 
     config_sub.add_parser("path", help="Print config file path")
-    cfg_migrate = config_sub.add_parser("migrate-secrets", help="Migrate legacy secrets")
+    cfg_migrate = config_sub.add_parser(
+        "migrate-secrets",
+        help="Move legacy secrets into the shared secrets file (~/.secrets.env)",
+    )
     cfg_migrate.add_argument("--force", action="store_true", help="Overwrite existing target values")
+    cfg_migrate.add_argument(
+        "--target",
+        choices=["env-file", "config", "secret-store"],
+        default="env-file",
+        help="Where to put what is found (default: env-file)",
+    )
     sub_config.set_defaults(func=cmd_config)
 
     # update
@@ -1251,7 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
     sub_update.add_argument(
         "--migrate-secrets",
         action="store_true",
-        help="Migrate legacy secrets into config.json",
+        help="Migrate legacy secrets into the shared secrets file (~/.secrets.env)",
     )
     sub_update.add_argument(
         "--re-register",

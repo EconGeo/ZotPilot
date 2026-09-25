@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from zotpilot.cli import cmd_index, cmd_register, cmd_setup, cmd_sync, cmd_update
 from zotpilot.runtime_settings import resolve_runtime_settings
+from zotpilot.secrets_env import load_env_file
 
 
 def _make_fake_zotero(tmp_path: Path) -> Path:
@@ -35,7 +36,7 @@ def _use_local_secrets(monkeypatch, tmp_path: Path) -> Path:
 
 
 class TestSetup:
-    def test_non_interactive_setup_writes_shared_config_and_api_keys(self, tmp_path, monkeypatch):
+    def test_non_interactive_setup_keeps_keys_out_of_config_json(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("GEMINI_API_KEY", "env-gemini")
@@ -69,13 +70,21 @@ class TestSetup:
         assert data["zotero_data_dir"] == str(zotero_dir)
         assert data["embedding_provider"] == "gemini"
         assert data["zotero_user_id"] == "12345678"
-        assert data["gemini_api_key"] == "env-gemini"
-        assert data["zotero_api_key"] == "env-zotero"
+        assert "gemini_api_key" not in data
+        assert "zotero_api_key" not in data
+
+        # Setup adopts keys found in the environment, as it always has — but
+        # they now land in the shared secrets file rather than in config.json.
+        assert load_env_file() == {
+            "GEMINI_API_KEY": "env-gemini",
+            "ZOTERO_API_KEY": "env-zotero",
+        }
 
         resolved = resolve_runtime_settings(config_dir / "config.json")
         assert resolved.config.gemini_api_key == "env-gemini"
         assert resolved.config.zotero_api_key == "env-zotero"
         assert resolved.config.zotero_user_id == "12345678"
+        assert resolved.sources["gemini_api_key"] == "env-override"
         assert resolved.secret_backend == "local-file"
 
     def test_setup_fails_when_client_registration_fails(self, tmp_path, monkeypatch):
@@ -279,7 +288,7 @@ class TestIndexCli:
 
 
 class TestRegister:
-    def test_register_legacy_secret_flags_import_into_config(self, tmp_path, monkeypatch):
+    def test_register_legacy_secret_flags_import_into_the_secrets_file(self, tmp_path, monkeypatch):
         _use_local_secrets(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -306,9 +315,14 @@ class TestRegister:
         assert resolved.config.gemini_api_key == "legacy-gemini"
         assert resolved.config.zotero_api_key == "legacy-zotero"
         assert resolved.config.zotero_user_id == "7654321"
+        assert load_env_file() == {
+            "GEMINI_API_KEY": "legacy-gemini",
+            "ZOTERO_API_KEY": "legacy-zotero",
+        }
         data = json.loads((tmp_path / "config.json").read_text())
-        assert data["gemini_api_key"] == "legacy-gemini"
-        assert data["zotero_api_key"] == "legacy-zotero"
+        assert "gemini_api_key" not in data
+        assert "zotero_api_key" not in data
+        assert data["zotero_user_id"] == "7654321"
 
 
 class TestUpdateSync:

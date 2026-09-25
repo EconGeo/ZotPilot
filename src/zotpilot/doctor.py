@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import _default_config_dir
 from .runtime_settings import SECRET_FIELDS, resolve_runtime_settings
 from .secret_store import describe_backend
+from .secrets_env import describe_env_file
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,44 @@ def _check_config_permissions(config_path: Path) -> CheckResult:
         status,
         f"{oct(mode)}; expected 0o600{' because config.json contains API keys' if has_config_secret else ''}",
     )
+
+
+def _check_config_secrets(config_path: Path) -> CheckResult:
+    """config.json must not hold credentials — they belong in the secrets file."""
+    if not config_path.exists():
+        return CheckResult("config_secrets", "pass", "no config file, so no keys in it")
+    try:
+        raw_data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return CheckResult("config_secrets", "warn", "config file is unreadable or malformed")
+    stored = [field for field in SECRET_FIELDS if raw_data.get(field)]
+    if not stored:
+        return CheckResult("config_secrets", "pass", "no API keys stored in config.json")
+    return CheckResult(
+        "config_secrets",
+        "fail",
+        f"config.json still holds {', '.join(stored)}. "
+        f"Fix: zotpilot config migrate-secrets",
+    )
+
+
+def _check_secrets_file(sources: dict[str, str]) -> CheckResult:
+    """Report the shared secrets file ZotPilot reads keys from."""
+    info = describe_env_file()
+    in_use = [field for field, source in sources.items() if source == "secrets-env"]
+    if info.readable:
+        detail = str(info.path)
+        if in_use:
+            detail += f" (supplies {', '.join(sorted(in_use))})"
+        return CheckResult("secrets_file", "pass", detail)
+    if not info.exists:
+        return CheckResult(
+            "secrets_file",
+            "warn",
+            f"{info.path} does not exist. Keys configured with "
+            f"`zotpilot config set <field> <value>` will be created there.",
+        )
+    return CheckResult("secrets_file", "fail", f"{info.path}: {info.detail}")
 
 
 def _check_zotero_data(config) -> CheckResult:
@@ -237,6 +276,8 @@ def run_checks(config_path: str | None = None, full: bool = False) -> list[Check
     # Load config (needed for remaining checks)
     config = resolved.config
     results.append(_check_config_permissions(resolved_config_path))
+    results.append(_check_config_secrets(resolved_config_path))
+    results.append(_check_secrets_file(resolved.sources))
 
     # 3. Zotero data directory + sqlite
     results.append(_check_zotero_data(config))

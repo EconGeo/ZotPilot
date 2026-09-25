@@ -243,21 +243,25 @@ zotpilot setup --non-interactive --provider gemini   # or dashscope / local
 <details>
 <summary><b>API keys and environment</b></summary>
 
-There are two layers:
+Settings and credentials live in two separate files:
 
-- `zotpilot setup` writes shared local config to `~/.config/zotpilot/config.json` on macOS / Linux, or `%APPDATA%\zotpilot\config.json` on Windows, and automatically deploys skills / registers MCP
-- `zotpilot config set` manages shared config; API keys are stored in the same `config.json`
+- **Settings** — `zotpilot setup` writes shared local config to `~/.config/zotpilot/config.json` on macOS / Linux, or `%APPDATA%\zotpilot\config.json` on Windows, and automatically deploys skills / registers MCP. `zotpilot config set` manages it.
+- **Credentials** — every API key lives in the shared shell secrets file `~/.secrets.env` (`chmod 600`), one `export NAME="value"` per line. `zotpilot config set <field> <key>` edits that file in place, leaving your other exports untouched. Override the path with `ZOTPILOT_ENV_FILE`.
 - `zotpilot upgrade` upgrades the CLI and refreshes packaged skills / MCP runtime
-- API keys are not embedded in Claude / Codex / OpenCode client config
+- API keys are never embedded in Claude / Codex / OpenCode client config, and never written to `config.json`
 
-Environment variables remain available as temporary overrides and take precedence over `config.json`:
+ZotPilot **reads `~/.secrets.env` itself** rather than relying on inheriting it. A GUI-launched MCP client starts the server with a minimal environment that never sourced your shell startup files, so a key that only exists as a shell export would be invisible to it.
+
+An actual environment variable still wins, as a one-off override:
 
 ```bash
 export GEMINI_API_KEY=<your-key>           # or DASHSCOPE_API_KEY
 export ANTHROPIC_API_KEY=<your-key>        # optional: complex-table vision extraction
 ```
 
-`config.json` may contain API keys. Do not commit it, paste it publicly, or sync it to untrusted locations. On shared machines, prefer interactive `zotpilot setup` so keys are not left in shell history.
+Resolution order, lowest to highest: `config.json` (legacy) → OS keychain (legacy) → `~/.secrets.env` → process environment → CLI flag.
+
+Keep `~/.secrets.env` at mode `0600`; ZotPilot refuses to read credentials from a group- or world-readable file. On shared machines, prefer interactive `zotpilot setup` so keys are not left in shell history.
 
 Recommended order:
 
@@ -322,11 +326,13 @@ zotpilot setup
 zotpilot doctor
 ```
 
-To migrate legacy client-embedded secrets:
+To move legacy secrets — embedded in a client config, left in `config.json`, or stored in the OS keychain — into `~/.secrets.env`:
 
 ```bash
 zotpilot config migrate-secrets
 ```
+
+This strips the keys from `config.json` as it goes. `zotpilot doctor` fails while any remain there.
 
 </details>
 
@@ -439,11 +445,13 @@ Installed zotpilot (wheel ships skills + references)
 
 # Config / index
 # macOS / Linux
-~/.config/zotpilot/config.json
+~/.config/zotpilot/config.json     # settings, never API keys
+~/.secrets.env                     # API keys (chmod 600)
 ~/.local/share/zotpilot/chroma/
 
 # Windows
-%APPDATA%\zotpilot\config.json
+%APPDATA%\zotpilot\config.json     # settings, never API keys
+%USERPROFILE%\.secrets.env          # API keys
 %APPDATA%\zotpilot\chroma\
 ```
 
@@ -470,7 +478,7 @@ Upgrades the active ZotPilot CLI, refreshes skill files, and reconciles MCP runt
 | `--cli-only` | Upgrade only the CLI package |
 | `--skill-only` | Refresh only skills and runtime registration |
 | `--re-register` | Force client registration refresh even if no drift is detected |
-| `--migrate-secrets` | Migrate legacy client-embedded secrets before reconciling runtime |
+| `--migrate-secrets` | Move legacy secrets into `~/.secrets.env` before reconciling runtime |
 
 > In editable/dev installs, `upgrade` reminds you to `git pull` for source updates but still reconciles runtime state.
 

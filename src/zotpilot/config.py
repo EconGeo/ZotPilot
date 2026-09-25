@@ -12,6 +12,19 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001"
 DASHSCOPE_DEFAULT_VISION_MODEL = "qwen3-vl-flash"
 
+# Fields that hold a credential. These are still *read* from config.json so
+# that an existing install keeps working, but they are never *written* there
+# any more: the shared shell secrets file (~/.secrets.env, see secrets_env.py)
+# is the single home for keys and tokens. ``zotpilot config migrate-secrets``
+# moves anything left behind, and ``zotpilot doctor`` reports what remains.
+SECRET_FIELDS: tuple[str, ...] = (
+    "gemini_api_key",
+    "dashscope_api_key",
+    "anthropic_api_key",
+    "zotero_api_key",
+    "semantic_scholar_api_key",
+)
+
 
 def _default_config_dir() -> Path:
     """Platform-aware config directory."""
@@ -209,7 +222,13 @@ class Config:
         )
 
     def save(self, path: Path | str | None = None) -> None:
-        """Write the config to JSON using an atomic write pattern."""
+        """Write the config to JSON using an atomic write pattern.
+
+        API keys are deliberately omitted — see ``SECRET_FIELDS``. A secret
+        already present in the file on disk is therefore dropped by this call,
+        so callers that might be holding one must move it to the secrets file
+        first (``credential_migration.migrate_secrets``).
+        """
         if path is not None:
             config_path = Path(path).expanduser()
         else:
@@ -242,21 +261,19 @@ class Config:
             "vision_enabled": self.vision_enabled,
             "vision_provider": self.vision_provider,
             "vision_model": self.vision_model,
-            "gemini_api_key": self.gemini_api_key,
-            "dashscope_api_key": self.dashscope_api_key,
-            "anthropic_api_key": self.anthropic_api_key,
             "vision_max_tables_per_run": self.vision_max_tables_per_run,
             "vision_max_cost_usd": self.vision_max_cost_usd,
             "max_pages": self.max_pages,
             "preflight_enabled": self.preflight_enabled,
-            "zotero_api_key": self.zotero_api_key,
             "zotero_user_id": self.zotero_user_id,
             "zotero_library_type": self.zotero_library_type,
-            "semantic_scholar_api_key": self.semantic_scholar_api_key,
             "collection_name": self.collection_name,
             "chunker_backend": self.chunker_backend,
         }
-        data = {key: value for key, value in data.items() if value is not None}
+        data = {
+            key: value for key, value in data.items()
+            if value is not None and key not in SECRET_FIELDS
+        }
 
         # Atomic write: temp file + rename
         tmp_path = None
