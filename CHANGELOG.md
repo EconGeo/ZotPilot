@@ -33,6 +33,12 @@
 
 ### Added
 
+- **Skills may ship a `references/` directory.** A packaged skill is now `src/zotpilot/skills/<name>.md` plus an optional sibling `src/zotpilot/skills/<name>/references/*.md`; `zotpilot setup` / `upgrade` deploy the directory alongside `SKILL.md` (`~/.claude/skills/<name>/references/…`), hash every file into the version marker, and remove reference files the package no longer ships on redeploy. A new test (`tests/test_skill_sources_in_sync.py`) fails the build if `claude-skills/` and `src/zotpilot/skills/` drift apart.
+
+### Changed
+
+- **`ztp-tutor` SKILL.md is short and direct** (431 → 266 lines). The persona-matching tables, the per-annotation field spec with its byte caps and per-element mechanics, and the `unplaced` reason table moved to `references/persona-parsing.md`, `references/annotation-spec.md` and `references/unplaced-reasons.md`. Each file is named inside the step that uses it and read only there. No step, tool call, cap, or safety rule changed.
+
 - **`ztp-tutor` 论文导读 / Deep Reading Guide** —— 新增单篇论文深度导读功能。`/ztp-tutor <标题>` 模糊匹配本地 Zotero 文献后，由 LLM 通读全文，将五维彩色高亮（核心论点 / 关键概念 / 实证证据 / 让步反驳 / 方法论）、逐句中文批注、图表与公式标注，以及第 1 页的论证结构概览便签，直接写入 Zotero 存储的 PDF，可在 Zotero 阅读器中原地打开查看，全程本地。功能会按 `~/.config/zotpilot/ZOTPILOT.md` 中的"阅读画像"自适应调整批注密度与讲解层次（如英文偏弱时补充术语解释与长难句拆解），并尊重 PDF 中已有的人工批注（不重复、不覆盖）。每次写入前自动生成 `.ztpbak` 备份，经独立文件写入、多重校验与原子替换保证原文永不损坏、失败即回滚；跨 macOS / Linux / Windows 均经兼容性加固。配套提供声明式 skill 与 MCP 工具 `get_paper_for_tutor` / `annotate_pdf` / `save_reading_persona`。首次启用后建议在真实 Zotero 阅读器中目视确认中文便签与五色高亮渲染正常。
 
 ## 如何更新 / How to Update
