@@ -6,8 +6,9 @@ ML-based layout detection (tables, figures, headers, footers, OCR).
 from __future__ import annotations
 
 import logging
+import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,6 +73,34 @@ def _should_run_full_document_ocr(
     low_text_overall = total_chars < min_chars_per_page * page_count
     mostly_near_empty = (near_empty_pages / page_count) >= near_empty_page_ratio_threshold
     return low_text_overall and mostly_near_empty
+
+
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _effective_native_lengths(page_texts: list[str], repeat_ratio: float = 0.8) -> list[int]:
+    """Per-page native text length, ignoring lines repeated on most pages.
+
+    Download stamps and watermarks ("Reproduced with permission of the copyright
+    owner...") put the same text layer on every page of a scan. Counting them makes
+    each page look text-bearing and hides the scan from the OCR fallback. Digits are
+    masked so page-numbered stamps still count as repeats.
+    """
+    def normalize(line: str) -> str:
+        return _DIGITS_RE.sub("#", " ".join(line.split()))
+
+    page_lines = [[line for line in text.splitlines() if line.strip()] for text in page_texts]
+    boilerplate: set[str] = set()
+    if len(page_texts) >= 2:
+        pages_with_line: Counter[str] = Counter()
+        for lines in page_lines:
+            pages_with_line.update({normalize(line) for line in lines})
+        min_pages = max(2, math.ceil(repeat_ratio * len(page_texts)))
+        boilerplate = {line for line, n in pages_with_line.items() if n >= min_pages}
+    return [
+        len("\n".join(line for line in lines if normalize(line) not in boilerplate).strip())
+        for lines in page_lines
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -293,22 +322,24 @@ def extract_document(
     # (pymupdf4llm's should_ocr_page() skips "photo-like" pages in scanned PDFs)
     _OCR_MIN_CHARS_PER_PAGE = 50
     total_chars = sum(len(chunk.get("text", "").strip()) for chunk in page_chunks)
-    native_text_lengths: list[int] = []
+    native_texts: list[str] = []
     native_scan_started = time.perf_counter()
     try:
         native_doc = pymupdf.open(str(pdf_path))
         for page in native_doc:
-            native_text_lengths.append(len(page.get_text().strip()))
+            native_texts.append(page.get_text())
         native_doc.close()
     except Exception as e:
         logger.warning("Native text scan failed for %s: %s", pdf_path.name, e)
-        native_text_lengths = []
+        native_texts = []
     native_scan_elapsed = time.perf_counter() - native_scan_started
 
+    native_text_lengths = _effective_native_lengths(native_texts)
+    boilerplate_chars = sum(len(t.strip()) for t in native_texts) - sum(native_text_lengths)
     near_empty_pages = sum(1 for n in native_text_lengths if n < 20)
     page_count = len(page_chunks)
     should_run_ocr = _should_run_full_document_ocr(
-        total_chars=total_chars,
+        total_chars=max(0, total_chars - boilerplate_chars),
         page_count=page_count,
         near_empty_pages=near_empty_pages,
         min_chars_per_page=_OCR_MIN_CHARS_PER_PAGE,
