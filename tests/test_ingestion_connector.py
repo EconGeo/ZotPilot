@@ -338,6 +338,8 @@ class TestSaveSingleAndVerify:
         mock_validate.return_value = {
             "valid": False, "item_type": "webpage",
             "title": "Snapshot", "reason": "invalid_item_type:webpage",
+            "data": {"itemType": "webpage", "title": "Snapshot",
+                     "dateAdded": "2099-01-01T00:00:00Z"},
         }
         mock_fallback.return_value = {
             "status": "saved_metadata_only", "method": "api_fallback",

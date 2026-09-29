@@ -343,6 +343,44 @@ class TestSaveSingleAndVerify:
         fallback.assert_not_called()
 
 
+    def test_unreadable_item_is_never_deleted_or_replaced(self):
+        """Local API down and Web API not synced: the found item is reported, not replaced."""
+        with patch.object(connector, "validate_saved_item", return_value={
+            "valid": False, "item_type": "unknown", "title": "", "reason": "validation_error:404",
+        }):
+            result, fallback, _ = _save(
+                {"success": False, "status": "timeout_likely_saved", "error": "t"},
+                find_recent_saves=lambda **kw: [{"key": "CUR", "in_target": True, "library": "G"}],
+            )
+        fallback.assert_not_called()
+        assert result["status"] == "saved_unconfirmed"
+        assert result["item_key"] == "CUR"
+
+    def test_old_invalid_item_is_never_deleted_even_without_identity_data(self):
+        """No DOI or title to compare: an invalid item still must be new to be deleted."""
+        result, fallback, _ = _save(
+            {"success": True, "item_key": "OLDWEB"},
+            doi=None, title=None,
+            item_data={"OLDWEB": {"itemType": "webpage", "title": "Some Page",
+                                  "dateAdded": "2020-01-01T00:00:00Z"}},
+        )
+        fallback.assert_not_called()
+        assert result["status"] == "saved_unconfirmed"
+
+    def test_every_risk_class_waits_for_the_extension_deadline(self):
+        with patch.object(connector, "enqueue_save_request", return_value=("r1", None)), \
+             patch.object(connector, "poll_single_save_result",
+                          return_value={"success": False, "status": "timeout_likely_saved"}) as poll, \
+             patch.object(connector, "discover_item_via_local_api", return_value=None), \
+             patch.object(connector.time, "sleep"):
+            connector.save_single_and_verify(
+                "https://doi.org/10.1016/j.x", "10.1016/j.x", "T",
+                collection_key=None, tags=None, bridge_url="b",
+                get_writer=MagicMock, writer_lock=MagicMock(), risk_class="manual_verification",
+            )
+        assert poll.call_args.kwargs["timeout_s"] == connector.CONNECTOR_SAVE_DEADLINE_S
+
+
 class TestDoiApiFallback:
     def test_status_follows_has_pdf_and_warning_states_reason(self):
         with patch.object(connector, "save_via_api", return_value={
@@ -528,3 +566,23 @@ def test_find_recent_saves_marks_target_library(tmp_path):
         client, names, dois=["10.1/x"], arxiv_id=None, since=since,
     )
     assert rows == [{"key": "NEWGRP", "in_target": True, "library": "NAR_settlement"}]
+
+
+def test_personal_target_ignores_a_group_override(monkeypatch, tmp_path):
+    """library=None means My Library even when the shared client/writer point at a group."""
+    group_client = ZoteroClient(_make_db(tmp_path), library_id=8)
+    group_writer = MagicMock()
+    group_writer._zot.library_type = "groups"
+    monkeypatch.setattr(ingestion_tool, "_get_zotero", lambda: group_client)
+    monkeypatch.setattr(ingestion_tool, "_get_writer", lambda: group_writer)
+    monkeypatch.setattr(ingestion_tool, "_get_config", lambda: MagicMock(
+        zotero_data_dir=tmp_path, zotero_user_id="42", zotero_api_key="k"))
+    ingestion_tool._clear_target_caches()
+    try:
+        target = ingestion_tool._resolve_target(None)
+        assert ingestion_tool._zotero_for_target(target).library_id == 1
+        writer = ingestion_tool._writer_for_target(target)
+        assert writer is not group_writer
+        assert writer._zot.library_type == "users" and writer._zot.library_id == "42"
+    finally:
+        ingestion_tool._clear_target_caches()

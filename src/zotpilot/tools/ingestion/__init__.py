@@ -76,7 +76,11 @@ def _resolve_target(library: str | None) -> IngestTarget:
 def _zotero_for_target(target: IngestTarget):
     """SQLite client scoped to the target library."""
     if target.is_personal:
-        return _get_zotero()
+        client = _get_zotero()
+        library_id = getattr(client, "library_id", 1)
+        if not isinstance(library_id, int) or library_id == 1:
+            return client
+        # The shared client follows a library override; ingest does not.
     client = _group_clients.get(target.local_library_id)
     if client is None:
         from ...zotero_client import ZoteroClient
@@ -88,15 +92,22 @@ def _zotero_for_target(target: IngestTarget):
 
 def _writer_for_target(target: IngestTarget):
     """Web API writer for the target library."""
+    shared = _get_writer()  # also enforces the credential checks
     if target.is_personal:
-        return _get_writer()
-    writer = _group_writers.get(str(target.remote_id))
+        library_type = getattr(getattr(shared, "_zot", None), "library_type", "users")
+        if not isinstance(library_type, str) or library_type == "users":
+            return shared
+        # The shared writer follows a library override or a group
+        # zotero_library_type; the personal target means My Library.
+        cache_key, remote_id, library_kind = "user", str(_get_config().zotero_user_id), "user"
+    else:
+        cache_key, remote_id, library_kind = str(target.remote_id), str(target.remote_id), "group"
+    writer = _group_writers.get(cache_key)
     if writer is None:
-        _get_writer()  # same credential checks as the personal writer
         from ...zotero_writer import ZoteroWriter
 
-        writer = ZoteroWriter(_get_config().zotero_api_key, str(target.remote_id), "group")
-        _group_writers[str(target.remote_id)] = writer
+        writer = ZoteroWriter(_get_config().zotero_api_key, remote_id, library_kind)
+        _group_writers[cache_key] = writer
     return writer
 
 

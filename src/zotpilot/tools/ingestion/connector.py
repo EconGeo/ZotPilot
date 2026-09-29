@@ -1376,12 +1376,15 @@ def save_single_and_verify(
         validation = validate_saved_item(
             item_key, get_writer=get_writer, api_prefix=api_prefix, _logger=_logger,
         )
+        if str(validation.get("reason") or "").startswith("validation_error"):
+            return validation  # unreadable; the caller reports it without touching it
         data = validation.get("data") or {}
+        if not validation["valid"]:
+            # Junk (webpage / error-page item) is deleted and replaced, so it
+            # must be this save's: added after the save started. Its title
+            # cannot be expected to match.
+            return validation if _added_since(data, started_at) else None
         same = identity_check(data, expected_dois=candidate_dois, arxiv_id=arxiv_id, title=title)
-        if same is False and not validation["valid"] and _added_since(data, started_at):
-            # Junk this save produced (webpage / error-page item): its title
-            # cannot match, but it is ours to delete and replace.
-            return validation
         if same is False:
             _logger.warning(
                 "Item %s (%r) is not the paper saved from %s — not reporting it",
@@ -1414,9 +1417,8 @@ def save_single_and_verify(
                 "title": title_text, "action_required": None, "warning": None}
     assert request_id is not None
 
-    # Step 2: Poll result. Manual-verification publishers hand over to the
-    # user sooner; everything else waits for the extension's own deadline.
-    save_timeout_s = 180.0 if risk_class == "manual_verification" else CONNECTOR_SAVE_DEADLINE_S
+    # Step 2: Poll result, for as long as the extension itself may take.
+    save_timeout_s = CONNECTOR_SAVE_DEADLINE_S
     save_result = poll_single_save_result(bridge_url, request_id, timeout_s=save_timeout_s)
 
     # Step 2.5: Timeout. The save may still complete in the browser, so look
@@ -1520,6 +1522,16 @@ def save_single_and_verify(
             "The connector reported a save, but the new item could not be identified.",
             title_text, found if found is not None and not found.get("in_target") else None,
         )
+
+    if str(validation.get("reason") or "").startswith("validation_error"):
+        # Zotero could not be read back (local API down, Web API not yet
+        # synced). The item exists; deleting or replacing it would lose it.
+        return {"status": "saved_unconfirmed", "method": "connector", "item_key": item_key,
+                "has_pdf": False, "title": title_text, "action_required": None,
+                "warning": (
+                    f"Saved as item {item_key}, but ZotPilot could not read it back "
+                    "to verify it. Check it in Zotero; do not re-ingest this paper."
+                )}
 
     # Step 4: Validate the saved item
     if not validation["valid"]:
