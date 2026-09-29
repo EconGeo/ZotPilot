@@ -66,9 +66,11 @@ _REAL_DATA_DIR = _default_data_dir().expanduser().resolve()
 def forbid_real_vector_store(monkeypatch):
     """Fail any test that opens a VectorStore inside the user's real data dir.
 
-    VectorStore's startup probe moves an unopenable store aside and starts an
-    empty one. On 2026-09-29 a status test with no chroma_db_path did exactly
-    that to a developer's damaged 1.6M-chunk index during a test run.
+    Tests must never open, create or probe the real store. On 2026-09-29 a
+    status test with no chroma_db_path opened a developer's damaged 1.6M-chunk
+    index, and the startup probe of that era moved it aside and started an
+    empty one. VectorStore now raises ChromaStoreUnopenableError instead of
+    moving anything, but a test still has no business touching real data.
     """
     from zotpilot import vector_store
 

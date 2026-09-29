@@ -48,6 +48,8 @@ def holder(tmp_path):
     if proc.poll() is None:
         proc.kill()
     proc.wait()
+    proc.stdin.close()
+    proc.stdout.close()
 
 
 def test_lease_held_by_other_process_blocks(tmp_path, holder):
