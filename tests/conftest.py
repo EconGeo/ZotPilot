@@ -55,6 +55,34 @@ def isolated_secrets_env_file(tmp_path, monkeypatch):
     monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(tmp_path / "isolated-secrets.env"))
 
 
+from pathlib import Path
+
+from zotpilot.config import _default_data_dir
+
+_REAL_DATA_DIR = _default_data_dir().expanduser().resolve()
+
+
+@pytest.fixture(autouse=True)
+def forbid_real_vector_store(monkeypatch):
+    """Fail any test that opens a VectorStore inside the user's real data dir.
+
+    VectorStore's startup probe moves an unopenable store aside and starts an
+    empty one. On 2026-09-29 a status test with no chroma_db_path did exactly
+    that to a developer's damaged 1.6M-chunk index during a test run.
+    """
+    from zotpilot import vector_store
+
+    real_init = vector_store.VectorStore.__init__
+
+    def guarded_init(self, db_path, *args, **kwargs):
+        resolved = Path(db_path).expanduser().resolve()
+        if resolved == _REAL_DATA_DIR or _REAL_DATA_DIR in resolved.parents:
+            raise RuntimeError(f"test opened the user's real vector store at {resolved}; use tmp_path")
+        real_init(self, db_path, *args, **kwargs)
+
+    monkeypatch.setattr(vector_store.VectorStore, "__init__", guarded_init)
+
+
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--benchmark"):
         return
