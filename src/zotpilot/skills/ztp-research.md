@@ -98,6 +98,7 @@ description: >
    - This is independent from step 4's access check. Step 4 may still run for OA items on IEEE / Wiley / Springer; step 4b CANNOT be skipped on OA grounds either. Elsevier's translator dialog triggers regardless of subscription / OA status.
 
 5. **Ingest**: `ingest_by_identifiers(candidates=selected_search_results)`
+   - **Target library.** Omit `library` to save into My Library. When the user (or the project's instructions) names a Zotero group library, pass `library="<group name or group ID>"`. The browser connector saves into whatever library is selected in Zotero Desktop, so ask the user to select that library there before ingesting; ZotPilot refuses to save when the selection does not match.
    - **Forward search result dicts directly.** `search_academic_databases` already returns structured candidates with `doi`, `arxiv_id`, `landing_page_url`, `is_oa_published`, and `title`. Pass the selected rows unchanged to `candidates=`. Do NOT reconstruct identifier strings from memory, and do NOT use the deprecated `identifiers=` parameter for search results.
    - The `local_duplicate` annotation from search tells you which candidates are already in the library. Filter them out before calling ingest unless the user explicitly wants a metadata refresh.
    - If the tool raises `INBOX collection unavailable`, `ZOTERO_API_KEY` / `ZOTERO_USER_ID` is missing — stop and ask the user to configure credentials before retrying.
@@ -105,6 +106,8 @@ description: >
    - If `action_required` contains `"preflight_blocked"` → **STOP**, show the blocked report and wait for user to complete verification (see **Preflight Blocking** below)
    - If `action_required` contains `"anti_bot_detected"` (from save_single_and_verify) → **STOP**, tell user to manually open browser for verification, wait for confirmation, retry with IDENTICAL inputs
    - If `action_required` contains "connector_offline" → **STOP**, surface remediation to user
+   - If `action_required` contains `"select_zotero_library"` → **STOP**. Nothing was saved. Surface its `message` (which library to click in Zotero Desktop), wait for the user, then retry with IDENTICAL inputs.
+   - If `action_required` contains `"save_unconfirmed"` → **STOP**. The browser may have saved the paper, but ZotPilot could not identify the item. Surface the `message`, ask the user to check Zotero, and **never re-ingest those papers** — a retry would save them twice.
    - All saved → proceed to Phase 3
 
    Gate semantics:
@@ -142,7 +145,7 @@ description: >
    | 3 | ❌ blocked | — | — | ... (reason: anti_bot_detected) |
    ```
 
-   - `状态` column: use the `status` field verbatim (`saved_with_pdf` / `saved_metadata_only` / `duplicate` / `blocked` / `failed`) with a matching emoji (✅ / ⚠️ / 📚 / ❌).
+   - `状态` column: use the `status` field verbatim (`saved_with_pdf` / `saved_metadata_only` / `saved_unconfirmed` / `duplicate` / `blocked` / `failed`) with a matching emoji (✅ / ⚠️ / ⚠️ / 📚 / ❌ / ❌).
    - `PDF` column: `✅` if `has_pdf: true`, `❌` if false, `—` if no item was created.
    - For `blocked` / `failed` rows, append `(reason: <error or error_code>)` to 标题.
    - Items are already in the `INBOX` collection at this point (routed at save time).
