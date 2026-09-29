@@ -380,8 +380,12 @@ def cmd_index(args):
     except Exception:
         pass
 
-    from .index_authority import LeaseContentionError
+    from .index_authority import IndexJournal, LeaseContentionError
     from .indexer import index_all_libraries
+
+    # Same journal as the MCP index_library tool: get_index_stats trusts it, so a
+    # run that skips it leaves stale in_progress entries hiding indexed docs.
+    journal = IndexJournal(Path(config.chroma_db_path).parent / "index_journal.json")
     try:
         result = index_all_libraries(
             config,
@@ -391,6 +395,7 @@ def cmd_index(args):
             title_pattern=args.title,
             max_pages=max_pages,
             batch_size=batch_size,
+            journal=journal,
         )
     except LeaseContentionError as e:
         print(f"Error: {e}", file=sys.stderr)

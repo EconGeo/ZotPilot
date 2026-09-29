@@ -12,6 +12,7 @@ from .config import Config
 from .embeddings import create_embedder
 from .index_authority import (
     IndexJournal,
+    clear_in_progress,
     index_write_lease,
     mark_committed,
     mark_in_progress,
@@ -855,8 +856,14 @@ class Indexer:
         if journal is not None:
             mark_in_progress(journal, item_key)
 
+        def nothing_stored(reason: str, grade: str):
+            # Nothing reached the store, so no partial write needs healing.
+            if journal is not None:
+                clear_in_progress(journal, item_key)
+            return 0, 0, reason, extraction.stats, grade
+
         if not extraction.pages:
-            return 0, 0, "PDF has 0 pages (corrupt or unreadable)", extraction.stats, "F"
+            return nothing_stored("PDF has 0 pages (corrupt or unreadable)", "F")
 
         total_chars = sum(len(p.markdown) for p in extraction.pages)
         quality_grade = extraction.quality_grade
@@ -870,7 +877,7 @@ class Indexer:
         )
 
         if total_chars == 0:
-            return 0, 0, f"{len(extraction.pages)} pages but no text", extraction.stats, quality_grade
+            return nothing_stored(f"{len(extraction.pages)} pages but no text", quality_grade)
 
         # Chunk using the new interface
         chunk_started = time.perf_counter()
@@ -881,7 +888,7 @@ class Indexer:
         )
         chunk_elapsed = time.perf_counter() - chunk_started
         if not chunks:
-            return 0, 0, f"{len(extraction.pages)} pages, {total_chars} chars but no chunks created", extraction.stats, quality_grade  # noqa: E501
+            return nothing_stored(f"{len(extraction.pages)} pages, {total_chars} chars but no chunks created", quality_grade)  # noqa: E501
         logger.debug(f"  Created {len(chunks)} chunks")
 
         # Look up journal quartile

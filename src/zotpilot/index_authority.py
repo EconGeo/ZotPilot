@@ -201,6 +201,17 @@ def mark_committed(journal: IndexJournal, doc_id: str) -> None:
     journal._save()
 
 
+def clear_in_progress(journal: IndexJournal, doc_id: str) -> None:
+    """Drop an in_progress entry for a document that ended with nothing stored.
+
+    A stuck in_progress entry excludes the doc from the authoritative indexed set
+    even after a later run stores it, so an attempt that wrote nothing must not
+    leave one behind.
+    """
+    if journal.in_progress.pop(doc_id, None) is not None:
+        journal._save()
+
+
 def get_committed_doc_ids(journal: IndexJournal) -> set[str]:
     """Return the set of committed doc IDs from the journal."""
     return set(journal.committed.keys())

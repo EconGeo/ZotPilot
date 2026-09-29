@@ -250,6 +250,7 @@ class TestIndexCli:
         config.validate.return_value = []
         config.max_pages = 40
         config.vision_enabled = False
+        config.chroma_db_path = tmp_path / "chroma"
 
         indexer = MagicMock()
         indexer.index_all.return_value = {
