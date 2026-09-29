@@ -68,7 +68,7 @@ class IdentifierResolver:
         for pattern in ("arxiv.org/abs/", "arxiv.org/pdf/"):
             idx = identifier.lower().find(pattern)
             if idx != -1:
-                arxiv_id = identifier[idx + len(pattern):].split("?")[0].rstrip(".pdf")
+                arxiv_id = identifier[idx + len(pattern):].split("?")[0].removesuffix(".pdf")
                 return self._resolve_arxiv(arxiv_id)
 
         # Explicit arxiv: prefix
