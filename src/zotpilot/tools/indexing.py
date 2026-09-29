@@ -10,12 +10,9 @@ from pydantic import BeforeValidator, Field
 
 from ..index_authority import (
     IndexJournal,
-    IndexLease,
     LeaseContentionError,
-    acquire_lease,
     authoritative_indexed_doc_ids,
     current_library_pdf_doc_ids,
-    release_lease,
 )
 from ..reranker import VALID_QUARTILES, VALID_SECTIONS
 from ..state import ToolError, _get_config, _get_reranker, _get_retriever, _get_store, _get_zotero, _index_lock, mcp
@@ -236,18 +233,9 @@ def index_library(
 
         config = _config
 
-        # Set up journal/lease for this indexing run
-        index_data_root = Path(config.chroma_db_path).parent
-        journal_path = index_data_root / "index_journal.json"
-        lease_path = index_data_root / "index_lease.json"
-        journal = IndexJournal(journal_path)
-        lease = IndexLease(lease_path)
-
-        # Acquire mutual-exclusion lease
-        try:
-            acquire_lease(lease)
-        except LeaseContentionError as e:
-            raise ToolError(str(e))
+        # Journal for this indexing run. The cross-process lease is taken inside
+        # index_all_libraries, which the CLI also goes through.
+        journal = IndexJournal(Path(config.chroma_db_path).parent / "index_journal.json")
 
         # Batch mode defaults to no_vision to avoid many small vision API calls
         if batch_size > 0 and not no_vision:
@@ -258,17 +246,20 @@ def index_library(
         effective_max_pages = max_pages if max_pages is not None else config.max_pages
 
         from ..indexer import index_all_libraries
-        result = index_all_libraries(
-            config,
-            force_reindex=force_reindex,
-            limit=limit,
-            item_key=item_key,
-            item_keys=item_keys,
-            title_pattern=title_pattern,
-            max_pages=effective_max_pages,
-            batch_size=batch_size if batch_size > 0 else None,
-            journal=journal,
-        )
+        try:
+            result = index_all_libraries(
+                config,
+                force_reindex=force_reindex,
+                limit=limit,
+                item_key=item_key,
+                item_keys=item_keys,
+                title_pattern=title_pattern,
+                max_pages=effective_max_pages,
+                batch_size=batch_size if batch_size > 0 else None,
+                journal=journal,
+            )
+        except LeaseContentionError as e:
+            raise ToolError(str(e))
 
         # Clear query embedding cache so new documents are findable
         _get_store().clear_query_cache()
@@ -332,7 +323,6 @@ def index_library(
 
         return response
     finally:
-        release_lease(lease)
         _index_lock.release()
 
 

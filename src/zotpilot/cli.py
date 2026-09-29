@@ -380,16 +380,21 @@ def cmd_index(args):
     except Exception:
         pass
 
+    from .index_authority import LeaseContentionError
     from .indexer import index_all_libraries
-    result = index_all_libraries(
-        config,
-        force_reindex=args.force,
-        limit=args.limit,
-        item_key=args.item_key,
-        title_pattern=args.title,
-        max_pages=max_pages,
-        batch_size=batch_size,
-    )
+    try:
+        result = index_all_libraries(
+            config,
+            force_reindex=args.force,
+            limit=args.limit,
+            item_key=args.item_key,
+            title_pattern=args.title,
+            max_pages=max_pages,
+            batch_size=batch_size,
+        )
+    except LeaseContentionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     print("\nIndexing complete:")
     print(f"  Indexed:         {result['indexed']}")
