@@ -339,7 +339,6 @@ def cmd_setup(args):
 
 def cmd_index(args):
     """Index Zotero library."""
-    from .indexer import Indexer
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

@@ -220,7 +220,6 @@ def index_library(
     try:
         from dataclasses import replace as dc_replace
 
-        from ..indexer import Indexer
 
         # Direct Python callers can still bypass FastMCP/Pydantic dispatch, so
         # keep the same string->list coercion here for consistency.
