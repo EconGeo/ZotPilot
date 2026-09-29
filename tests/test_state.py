@@ -309,6 +309,7 @@ class TestMCPInstructions:
             "annotate_pdf",
             "browse_library",
             "create_note",
+            "delete_note",
             "get_annotations",
             "get_citations",
             "get_index_stats",

@@ -132,7 +132,8 @@ class TestMainDelegation:
             captured['args'] = args
             return 0
         def fake_exit(code):
-            pass
+            # A no-op exit lets main() fall through to the uv path, which needs uv installed.
+            raise SystemExit(code)
         old_argv = _rm.sys.argv
         old_exit = _rm.sys.exit
         old_hr = _rm._handle_register
@@ -140,11 +141,13 @@ class TestMainDelegation:
             _rm.sys.argv = ['run.py', 'register', '--platform', 'codex']
             _rm.sys.exit = fake_exit
             _rm._handle_register = fake_hr
-            _rm.main()
+            with pytest.raises(SystemExit) as exc:
+                _rm.main()
         finally:
             _rm.sys.argv = old_argv
             _rm.sys.exit = old_exit
             _rm._handle_register = old_hr
+        assert exc.value.code == 0
         assert captured['called'] is True
         assert captured['args'] == ['--platform', 'codex']
 

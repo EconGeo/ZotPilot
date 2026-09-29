@@ -359,7 +359,7 @@ class TestContextAndIndexingContracts:
         assert result["merged_text"] == ""
         assert result["note"] == "No text chunks found for this document"
 
-    def test_get_index_stats_samples_unindexed(self):
+    def test_get_index_stats_samples_unindexed(self, single_library_indexing, monkeypatch):
         from zotpilot.tools.indexing import get_index_stats
 
         store = MagicMock()
@@ -372,11 +372,16 @@ class TestContextAndIndexingContracts:
         config.embedding_provider = "gemini"
         config.stats_sample_limit = 100
 
+        monkeypatch.setattr(
+            "zotpilot.indexer.global_pdf_doc_ids",
+            lambda config: {i.item_key for i in zotero.get_all_items_with_pdfs.return_value},
+        )
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
             patch("zotpilot.tools.indexing._get_retriever"),
             patch("zotpilot.tools.indexing._get_store", return_value=store),
             patch("zotpilot.tools.indexing._get_zotero", return_value=zotero),
+            patch("zotpilot.zotero_client.ZoteroClient", return_value=zotero),
         ):
             result = get_index_stats(limit=5)
 
@@ -385,7 +390,7 @@ class TestContextAndIndexingContracts:
         assert len(result["unindexed_papers"]) == 5
         assert len(json.dumps(result, ensure_ascii=False)) < 2000
 
-    def test_index_library_summary_is_opt_in(self):
+    def test_index_library_summary_is_opt_in(self, single_library_indexing, tmp_path):
         from zotpilot.tools.indexing import index_library
 
         index_result = {
@@ -406,6 +411,7 @@ class TestContextAndIndexingContracts:
         config.validate.return_value = []
         config.max_pages = 40
         config.vision_enabled = True
+        config.chroma_db_path = tmp_path / "chroma"
 
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
@@ -421,7 +427,7 @@ class TestContextAndIndexingContracts:
         assert "quality_distribution" not in compact
         assert "quality_distribution" in full
 
-    def test_index_library_accepts_item_keys_json_string(self):
+    def test_index_library_accepts_item_keys_json_string(self, single_library_indexing, tmp_path):
         from zotpilot.tools.indexing import index_library
 
         index_result = {
@@ -437,6 +443,7 @@ class TestContextAndIndexingContracts:
         config.validate.return_value = []
         config.max_pages = 40
         config.vision_enabled = True
+        config.chroma_db_path = tmp_path / "chroma"
 
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
@@ -453,7 +460,7 @@ class TestContextAndIndexingContracts:
         assert mock_indexer.index_all.call_args.kwargs["item_keys"] == ["KBQCDWBE", "54ZZF3LP"]
 
 
-    def test_index_library_exposes_vision_budget_summary_when_requested(self):
+    def test_index_library_exposes_vision_budget_summary_when_requested(self, single_library_indexing, tmp_path):
         from zotpilot.tools.indexing import index_library
 
         index_result = {
@@ -478,6 +485,7 @@ class TestContextAndIndexingContracts:
         config.validate.return_value = []
         config.max_pages = 40
         config.vision_enabled = True
+        config.chroma_db_path = tmp_path / "chroma"
 
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
@@ -494,7 +502,7 @@ class TestContextAndIndexingContracts:
         assert result["vision_budget_skipped"] is True
         assert result["vision_skip_reason"] == "table cap 5"
 
-    def test_get_index_stats_paginates_unindexed_papers(self):
+    def test_get_index_stats_paginates_unindexed_papers(self, single_library_indexing, monkeypatch):
         from zotpilot.tools.indexing import get_index_stats
 
         store = MagicMock()
@@ -506,11 +514,16 @@ class TestContextAndIndexingContracts:
         config = _make_config()
         config.stats_sample_limit = 10
 
+        monkeypatch.setattr(
+            "zotpilot.indexer.global_pdf_doc_ids",
+            lambda config: {i.item_key for i in zotero.get_all_items_with_pdfs.return_value},
+        )
         with (
             patch("zotpilot.tools.indexing._get_config", return_value=config),
             patch("zotpilot.tools.indexing._get_retriever"),
             patch("zotpilot.tools.indexing._get_store", return_value=store),
             patch("zotpilot.tools.indexing._get_zotero", return_value=zotero),
+            patch("zotpilot.zotero_client.ZoteroClient", return_value=zotero),
         ):
             result = get_index_stats(limit=2, offset=1)
 

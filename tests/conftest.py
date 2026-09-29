@@ -83,6 +83,24 @@ def forbid_real_vector_store(monkeypatch):
     monkeypatch.setattr(vector_store.VectorStore, "__init__", guarded_init)
 
 
+@pytest.fixture
+def single_library_indexing(monkeypatch):
+    """Let index_all_libraries run against a mocked config and a mocked Indexer.
+
+    The orchestrator opens the real Zotero database to enumerate libraries and
+    takes an OS lock beside config.chroma_db_path. With a MagicMock config both
+    resolve to junk paths (a stray MagicMock/ directory, FileNotFoundError), so
+    tests that only care about what reaches Indexer.index_all stub them out.
+    """
+    from contextlib import nullcontext
+
+    from zotpilot import indexer
+
+    monkeypatch.setattr(indexer, "enumerate_indexable_libraries", lambda config: [(1, "My Library")])
+    monkeypatch.setattr(indexer, "global_pdf_doc_ids", lambda config: set())
+    monkeypatch.setattr(indexer, "index_write_lease", lambda data_root: nullcontext())
+
+
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--benchmark"):
         return
