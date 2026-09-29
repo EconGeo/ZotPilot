@@ -22,10 +22,12 @@ os.environ["ZOTPILOT_ENV_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="zotpilot-test-envfile-"), "secrets.env"
 )
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from zotpilot.config import _default_data_dir
 from zotpilot.models import (
     Chunk,
     PageExtraction,
@@ -55,10 +57,6 @@ def isolated_secrets_env_file(tmp_path, monkeypatch):
     monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(tmp_path / "isolated-secrets.env"))
 
 
-from pathlib import Path
-
-from zotpilot.config import _default_data_dir
-
 _REAL_DATA_DIR = _default_data_dir().expanduser().resolve()
 
 
@@ -66,9 +64,11 @@ _REAL_DATA_DIR = _default_data_dir().expanduser().resolve()
 def forbid_real_vector_store(monkeypatch):
     """Fail any test that opens a VectorStore inside the user's real data dir.
 
-    VectorStore's startup probe moves an unopenable store aside and starts an
-    empty one. On 2026-09-29 a status test with no chroma_db_path did exactly
-    that to a developer's damaged 1.6M-chunk index during a test run.
+    Tests must never open, create or probe the real store. On 2026-09-29 a
+    status test with no chroma_db_path opened a developer's damaged 1.6M-chunk
+    index, and the startup probe of that era moved it aside and started an
+    empty one. VectorStore now raises ChromaStoreUnopenableError instead of
+    moving anything, but a test still has no business touching real data.
     """
     from zotpilot import vector_store
 
@@ -81,6 +81,33 @@ def forbid_real_vector_store(monkeypatch):
         real_init(self, db_path, *args, **kwargs)
 
     monkeypatch.setattr(vector_store.VectorStore, "__init__", guarded_init)
+
+
+def _magicmock_tree(root: Path) -> set[str]:
+    stray = root / "MagicMock"
+    if not stray.exists():
+        return set()
+    return {str(p) for p in stray.rglob("*")} | {str(stray)}
+
+
+@pytest.fixture(autouse=True)
+def forbid_magicmock_paths_in_cwd():
+    """Fail any test that creates files under ``./MagicMock``.
+
+    Code that joins a path onto a MagicMock attribute (``config.chroma_db_path``
+    left unset on a ``MagicMock()`` config) and then mkdirs it writes a relative
+    ``MagicMock/mock.chroma_db_path/...`` tree into whatever the cwd is, usually
+    the repo root. Give the mock a real ``tmp_path`` instead.
+    """
+    cwd = Path.cwd()
+    before = _magicmock_tree(cwd)
+    yield
+    created = sorted(_magicmock_tree(cwd) - before)
+    if created:
+        pytest.fail(
+            f"test created stray MagicMock path(s) in {cwd}: {created}; "
+            "set the mocked config path (e.g. config.chroma_db_path) to a tmp_path"
+        )
 
 
 @pytest.fixture

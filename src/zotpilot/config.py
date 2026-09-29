@@ -63,6 +63,26 @@ def profile_path() -> Path:
     return canonical
 
 
+def chroma_db_path_error(chroma_db_path) -> str | None:
+    """Return why ``chroma_db_path`` is unusable, or None if it is acceptable.
+
+    A relative path is rejected: it resolves against the working directory of
+    whichever shell or MCP client launched ZotPilot, so each session would
+    silently create and write its own empty index somewhere different.
+    """
+    try:
+        path = Path(chroma_db_path)
+    except TypeError:
+        return f"chroma_db_path is not a path: {chroma_db_path!r}"
+    if not path.is_absolute():
+        return (
+            f"chroma_db_path must be an absolute path, got {str(path)!r} "
+            "(a relative path resolves against the launching process's working directory). "
+            "Fix: zotpilot config set chroma_db_path /absolute/path/to/chroma"
+        )
+    return None
+
+
 def _old_config_path() -> Path:
     """Legacy deep-zotero config path."""
     if sys.platform == "win32":
@@ -306,6 +326,9 @@ class Config:
             errors.append(f"Zotero data dir not found: {self.zotero_data_dir}")
         if not (self.zotero_data_dir / "zotero.sqlite").exists():
             errors.append(f"Zotero database not found: {self.zotero_data_dir / 'zotero.sqlite'}")
+        chroma_error = chroma_db_path_error(self.chroma_db_path)
+        if chroma_error:
+            errors.append(chroma_error)
 
         if self.embedding_provider == "gemini" and not self.gemini_api_key:
             errors.append("GEMINI_API_KEY not set (required for embedding_provider='gemini')")

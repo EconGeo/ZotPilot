@@ -336,9 +336,10 @@ class BridgeServer:
         logger.info(f"Bridge server listening on http://127.0.0.1:{self.port}")
 
     def stop(self):
-        """Stop the HTTP server."""
+        """Stop the HTTP server and release its listening socket."""
         if self._server:
             self._server.shutdown()
+            self._server.server_close()
             self._server = None
 
     @staticmethod

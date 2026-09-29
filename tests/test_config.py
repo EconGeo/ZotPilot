@@ -262,3 +262,45 @@ class TestConfigValidation:
         errors = cfg.validate()
 
         assert any("Invalid dashscope_embedding_endpoint" in e for e in errors)
+
+
+class TestChromaDbPathValidation:
+    """A relative chroma_db_path resolves against each launcher's cwd and silently
+    creates a new empty index there, so validate() must reject it."""
+
+    def _valid_config(self, tmp_path, monkeypatch, **overrides):
+        _use_local_secrets(monkeypatch, tmp_path)
+        (tmp_path / "zotero.sqlite").touch()
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "zotero_data_dir": str(tmp_path),
+            "embedding_provider": "local",
+            **overrides,
+        }))
+        return Config.load(path=config_file)
+
+    def test_relative_chroma_db_path_is_an_error(self, tmp_path, monkeypatch):
+        cfg = self._valid_config(tmp_path, monkeypatch, chroma_db_path="zotpilot/chroma")
+
+        errors = cfg.validate()
+
+        assert any("chroma_db_path must be an absolute path" in e and "zotpilot/chroma" in e for e in errors)
+
+    def test_tilde_chroma_db_path_is_accepted(self, tmp_path, monkeypatch):
+        cfg = self._valid_config(tmp_path, monkeypatch, chroma_db_path="~/zotpilot-test-chroma")
+
+        assert not any("chroma_db_path" in e for e in cfg.validate())
+
+    def test_default_chroma_db_path_is_accepted(self, tmp_path, monkeypatch):
+        cfg = self._valid_config(tmp_path, monkeypatch)
+
+        assert cfg.validate() == []
+
+    def test_relative_chroma_db_path_blocks_cli_index(self, tmp_path, monkeypatch):
+        from zotpilot.cli import _split_validate_errors
+
+        cfg = self._valid_config(tmp_path, monkeypatch, chroma_db_path="chroma")
+
+        blocking, _warnings = _split_validate_errors(cfg.validate())
+
+        assert any("chroma_db_path" in e for e in blocking)

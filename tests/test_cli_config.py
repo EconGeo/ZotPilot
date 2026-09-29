@@ -194,11 +194,37 @@ class TestConfigCommand:
         assert "secret_backend" in data
         assert "write_ops_ready" in data
 
+    def test_status_json_reports_relative_chroma_db_path_without_creating_it(self, tmp_path, monkeypatch, capsys):
+        from unittest.mock import patch
+
+        _use_local_secrets(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "zotero_data_dir": str(tmp_path),
+                    "chroma_db_path": "relative-chroma",
+                    "embedding_provider": "none",
+                }
+            )
+        )
+
+        from zotpilot.cli import cmd_status
+
+        with patch("zotpilot.vector_store.VectorStore") as store_cls:
+            rc = cmd_status(SimpleNamespace(json=True, config=str(cfg_path)))
+        data = json.loads(capsys.readouterr().out)
+
+        assert rc == 1
+        assert any("chroma_db_path must be an absolute path" in e for e in data["errors"])
+        store_cls.assert_not_called()
+        assert not (tmp_path / "relative-chroma").exists()
+
     def test_status_opens_the_configured_collection(self, tmp_path, monkeypatch, capsys):
         """status must count the configured collection, not create an empty default one."""
-        from unittest.mock import MagicMock, patch
-
         import sqlite3
+        from unittest.mock import MagicMock, patch
 
         _use_local_secrets(monkeypatch, tmp_path)
         sqlite3.connect(tmp_path / "zotero.sqlite").close()  # human-readable status exits early without it

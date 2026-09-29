@@ -16,7 +16,7 @@ from ._platforms import (
     _get_skill_dirs,  # noqa: F401 — re-exported for test patching compatibility
     _get_vcs_install_url,
 )
-from .config import SECRET_FIELDS, Config, _default_config_dir
+from .config import SECRET_FIELDS, Config, _default_config_dir, chroma_db_path_error
 from .credential_migration import TARGET_ENV_FILE, migrate_secrets
 from .runtime_settings import FIELD_TO_ENV, resolve_runtime_config, resolve_runtime_settings
 from .secret_store import SecretStoreError, delete_secret
@@ -490,27 +490,30 @@ def cmd_status(args):
             result["warnings"].append(
                 f"Deployment status unavailable: {deployment['deployment_warning']}"
             )
-        try:
-            from .embeddings import create_embedder
-            from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
-            from .vector_store import VectorStore
-            from .zotero_client import ZoteroClient
+        # Opening a store at an invalid (relative) path would create a stray empty
+        # index in the cwd; validate() has already reported the path as an error.
+        if chroma_db_path_error(config.chroma_db_path) is None:
+            try:
+                from .embeddings import create_embedder
+                from .index_authority import authoritative_indexed_doc_ids, current_library_pdf_doc_ids
+                from .vector_store import VectorStore
+                from .zotero_client import ZoteroClient
 
-            embedder = create_embedder(config)
-            store = VectorStore(
-                config.chroma_db_path,
-                embedder,
-                collection_name=getattr(config, "collection_name", "chunks"),
-            )
-            zotero = ZoteroClient(config.zotero_data_dir)
-            current_doc_ids = current_library_pdf_doc_ids(zotero)
-            doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
-            total = store.count_chunks_for_doc_ids(doc_ids)
-            result["doc_count"] = len(doc_ids)
-            result["chunk_count"] = total
-            result["index_ready"] = len(doc_ids) > 0
-        except Exception as e:
-            result["errors"].append(f"Index error: {e}")
+                embedder = create_embedder(config)
+                store = VectorStore(
+                    config.chroma_db_path,
+                    embedder,
+                    collection_name=getattr(config, "collection_name", "chunks"),
+                )
+                zotero = ZoteroClient(config.zotero_data_dir)
+                current_doc_ids = current_library_pdf_doc_ids(zotero)
+                doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
+                total = store.count_chunks_for_doc_ids(doc_ids)
+                result["doc_count"] = len(doc_ids)
+                result["chunk_count"] = total
+                result["index_ready"] = len(doc_ids) > 0
+            except Exception as e:
+                result["errors"].append(f"Index error: {e}")
 
         print(json.dumps(result, indent=2))
         return 1 if blocking_errors else 0

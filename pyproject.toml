@@ -109,4 +109,8 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=zotpilot --cov-report=term-missing --cov-fail-under=29"
-markers = ["benchmark: external API benchmark, slow"]
+markers = [
+    "benchmark: external API benchmark, slow",
+    "integration: replays recorded incident traces through the real workflow code",
+    "e2e: end-to-end against a real local PDF (gated by ZTP_TUTOR_E2E_PDF)",
+]
