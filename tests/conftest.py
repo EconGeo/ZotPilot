@@ -83,6 +83,33 @@ def forbid_real_vector_store(monkeypatch):
     monkeypatch.setattr(vector_store.VectorStore, "__init__", guarded_init)
 
 
+def _magicmock_tree(root: Path) -> set[str]:
+    stray = root / "MagicMock"
+    if not stray.exists():
+        return set()
+    return {str(p) for p in stray.rglob("*")} | {str(stray)}
+
+
+@pytest.fixture(autouse=True)
+def forbid_magicmock_paths_in_cwd():
+    """Fail any test that creates files under ``./MagicMock``.
+
+    Code that joins a path onto a MagicMock attribute (``config.chroma_db_path``
+    left unset on a ``MagicMock()`` config) and then mkdirs it writes a relative
+    ``MagicMock/mock.chroma_db_path/...`` tree into whatever the cwd is, usually
+    the repo root. Give the mock a real ``tmp_path`` instead.
+    """
+    cwd = Path.cwd()
+    before = _magicmock_tree(cwd)
+    yield
+    created = sorted(_magicmock_tree(cwd) - before)
+    if created:
+        pytest.fail(
+            f"test created stray MagicMock path(s) in {cwd}: {created}; "
+            "set the mocked config path (e.g. config.chroma_db_path) to a tmp_path"
+        )
+
+
 @pytest.fixture
 def single_library_indexing(monkeypatch):
     """Let index_all_libraries run against a mocked config and a mocked Indexer.

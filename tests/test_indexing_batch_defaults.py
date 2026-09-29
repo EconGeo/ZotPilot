@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 
-def test_index_library_defaults_to_small_batches():
+def test_index_library_defaults_to_small_batches(tmp_path):
     from zotpilot.tools.indexing import index_library
 
     index_result = {
@@ -14,6 +14,7 @@ def test_index_library_defaults_to_small_batches():
         "has_more": False,
     }
     config = MagicMock()
+    config.chroma_db_path = tmp_path / "chroma"  # the journal is created beside it
     config.validate.return_value = []
     config.max_pages = 40
     config.vision_enabled = True

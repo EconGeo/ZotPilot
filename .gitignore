@@ -62,7 +62,6 @@ AGENTS.md
 # OMC / oh-my-claudecode runtime state (local only)
 .omx/
 .sisyphus/
-MagicMock/
 
 # Local Claude Code state (settings, locks, worktrees) — not for repo
 .claude/
