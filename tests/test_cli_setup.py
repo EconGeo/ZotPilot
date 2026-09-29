@@ -243,7 +243,7 @@ class TestSetup:
 
 
 class TestIndexCli:
-    def test_index_cli_defaults_to_batch_size_two(self, tmp_path, monkeypatch):
+    def test_index_cli_defaults_to_batch_size_two(self, tmp_path, monkeypatch, single_library_indexing):
         _use_local_secrets(monkeypatch, tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         config = MagicMock()
