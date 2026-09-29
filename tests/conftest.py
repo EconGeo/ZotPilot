@@ -22,10 +22,12 @@ os.environ["ZOTPILOT_ENV_FILE"] = os.path.join(
     tempfile.mkdtemp(prefix="zotpilot-test-envfile-"), "secrets.env"
 )
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from zotpilot.config import _default_data_dir
 from zotpilot.models import (
     Chunk,
     PageExtraction,
@@ -54,10 +56,6 @@ def isolated_secrets_env_file(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("ZOTPILOT_ENV_FILE", str(tmp_path / "isolated-secrets.env"))
 
-
-from pathlib import Path
-
-from zotpilot.config import _default_data_dir
 
 _REAL_DATA_DIR = _default_data_dir().expanduser().resolve()
 

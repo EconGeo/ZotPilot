@@ -130,7 +130,8 @@ class VectorStore:
                 stored_dims = (existing.metadata or {}).get("embedding_dimensions")
                 if stored_dims is not None and stored_dims != embedder_dims:
                     raise EmbeddingDimensionMismatchError(
-                        f"Embedding dimension mismatch: collection '{self.collection_name}' has {stored_dims} dimensions "
+                        f"Embedding dimension mismatch: collection '{self.collection_name}' "
+                        f"has {stored_dims} dimensions "
                         f"but current embedder uses {embedder_dims} dimensions. "
                         f"Delete the index and reindex with --force, or switch back to "
                         f"the original embedding provider.\n"
