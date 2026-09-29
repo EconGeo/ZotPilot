@@ -2,8 +2,10 @@
 
 import json
 import os
+import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -104,7 +106,15 @@ class IndexJournal:
 
 
 class IndexLease:
-    """Mutual-exclusion lease for indexing operations."""
+    """Mutual-exclusion lease for indexing operations.
+
+    With a path, exclusion is an OS advisory lock on ``<lease>.lock`` held for the
+    whole indexing run. The kernel releases it when the holder exits or crashes,
+    so a live holder is never treated as stale however long it runs, and a dead
+    one never blocks. The JSON file only records who holds it, for messages.
+
+    Without a path (tests), the lease is in-memory and PID-based.
+    """
 
     def __init__(self, lease_path: str | Path | None = None) -> None:
         self._path: Path | None = None
@@ -113,11 +123,23 @@ class IndexLease:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         self.holder_pid: int | None = None
         self.acquired_at: float | None = None
+        self._lock_fd: int | None = None
         self._load()
 
     @property
     def path(self) -> Path | None:
         return self._path
+
+    @property
+    def lock_path(self) -> Path | None:
+        return None if self._path is None else self._path.with_suffix(".lock")
+
+    @property
+    def held(self) -> bool:
+        """True if this object currently holds the lease."""
+        if self._path is None:
+            return self.holder_pid == os.getpid()
+        return self._lock_fd is not None
 
     def _load(self) -> None:
         """Load lease from disk if a path is set and the file exists."""
@@ -202,35 +224,96 @@ def record_table_failure(journal: IndexJournal, doc_id: str, reason: str) -> Non
         journal._save()
 
 
-def acquire_lease(lease: IndexLease) -> str | None:
-    """Attempt to acquire an indexing lease. Returns lease ID on success.
+def _contention_error(lease: IndexLease) -> LeaseContentionError:
+    holder = f"PID {lease.holder_pid}" if lease.holder_pid is not None else "another process"
+    age = f" (acquired {time.time() - lease.acquired_at:.0f}s ago)" if lease.acquired_at is not None else ""
+    return LeaseContentionError(
+        f"Indexing lease held by {holder}{age}. Another indexing run is writing to the "
+        "vector store; wait for it to finish. Two concurrent writers corrupt the index."
+    )
 
-    Stale leases (dead PID or older than 60 seconds) are cleared automatically.
+
+def _try_lock(fd: int) -> bool:
+    """Take an exclusive non-blocking OS lock on fd. False if another holder has it."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def acquire_lease(lease: IndexLease) -> str | None:
+    """Acquire the indexing lease or raise LeaseContentionError. Returns lease ID on success.
+
+    Never times out a live holder: indexing a large library legitimately takes hours.
     """
-    now = time.time()
-    if lease.holder_pid is not None and lease.acquired_at is not None:
-        # Check if lease is stale
-        pid_alive = _is_pid_alive(lease.holder_pid)
-        age = now - lease.acquired_at
-        if not pid_alive or age > 60:
-            # Stale lease — clear it
-            lease.holder_pid = None
-            lease.acquired_at = None
-            lease._save()
-        else:
-            raise LeaseContentionError(f"Indexing lease held by PID {lease.holder_pid} (acquired {age:.0f}s ago)")
+    if lease.held:
+        raise _contention_error(lease)
+
+    if lease.path is None:
+        if lease.holder_pid is not None and _is_pid_alive(lease.holder_pid):
+            raise _contention_error(lease)
+    else:
+        fd = os.open(lease.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        if not _try_lock(fd):
+            os.close(fd)
+            lease._load()  # report the current holder
+            raise _contention_error(lease)
+        lease._lock_fd = fd
 
     lease.holder_pid = os.getpid()
-    lease.acquired_at = now
+    lease.acquired_at = time.time()
     lease._save()
     return "active"
 
 
 def release_lease(lease: IndexLease) -> None:
-    """Release the current indexing lease."""
+    """Release the lease if this object holds it; a non-holder never clears another's lease."""
+    if not lease.held:
+        return
     lease.holder_pid = None
     lease.acquired_at = None
     lease._save()
+    if lease._lock_fd is not None:
+        fd, lease._lock_fd = lease._lock_fd, None
+        try:
+            _unlock(fd)
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def index_write_lease(data_root: str | Path):
+    """Hold the indexing lease for ``data_root`` (the directory containing the Chroma store)."""
+    lease = IndexLease(Path(data_root) / "index_lease.json")
+    acquire_lease(lease)
+    try:
+        yield lease
+    finally:
+        release_lease(lease)
 
 
 def _is_pid_alive(pid: int) -> bool:

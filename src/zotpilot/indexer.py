@@ -12,6 +12,7 @@ from .config import Config
 from .embeddings import create_embedder
 from .index_authority import (
     IndexJournal,
+    index_write_lease,
     mark_committed,
     mark_in_progress,
     reconcile_orphaned_index_docs,
@@ -118,7 +119,37 @@ def index_all_libraries(
     Passes the full cross-library PDF doc-id union as ``protected_doc_ids`` to each
     per-library ``Indexer.index_all`` so reconciliation only removes docs absent
     from every library. Threads ``batch_size`` as a budget across libraries.
+
+    Every write path (CLI and MCP) comes through here, so the indexing lease is
+    taken here for the whole run. Raises LeaseContentionError if another process
+    is indexing: two writers on one Chroma store corrupt its HNSW index.
     """
+    with index_write_lease(Path(config.chroma_db_path).parent):
+        return _index_all_libraries_locked(
+            config,
+            force_reindex=force_reindex,
+            limit=limit,
+            item_key=item_key,
+            item_keys=item_keys,
+            title_pattern=title_pattern,
+            max_pages=max_pages,
+            batch_size=batch_size,
+            journal=journal,
+        )
+
+
+def _index_all_libraries_locked(
+    config,
+    *,
+    force_reindex: bool,
+    limit: int | None,
+    item_key: str | None,
+    item_keys: list[str] | None,
+    title_pattern: str | None,
+    max_pages: int,
+    batch_size: int | None,
+    journal,
+) -> dict:
     union = global_pdf_doc_ids(config)
     libraries = enumerate_indexable_libraries(config)
 

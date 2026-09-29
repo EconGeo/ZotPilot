@@ -70,6 +70,11 @@ def _make_db(tmp_path):
 class _Cfg:
     zotero_data_dir: Path
 
+    @property
+    def chroma_db_path(self) -> Path:
+        # index_all_libraries takes the indexing lease beside the store
+        return self.zotero_data_dir / "chroma"
+
 
 def test_enumerate_indexable_libraries_lists_user_and_group(tmp_path):
     data_dir = _make_db(tmp_path)

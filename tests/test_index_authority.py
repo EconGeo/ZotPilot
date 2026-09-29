@@ -315,16 +315,24 @@ class TestStaleLeaseRecovery:
         acquire_lease(lease)  # should clear stale and succeed
         assert lease.holder_pid == os.getpid()
 
-    def test_stale_timestamp_cleared(self):
-        _requires_journal()
-        from zotpilot.index_authority import IndexLease, acquire_lease
+    def test_old_lease_held_by_live_pid_is_not_cleared(self):
+        """Regression (2026-09-28): a live holder must never age out.
+
+        The lease used to be treated as stale after 60 s, so a long MCP indexing
+        run lost exclusion and a second writer corrupted the HNSW index.
+        """
+        from zotpilot.index_authority import (
+            IndexLease,
+            LeaseContentionError,
+            acquire_lease,
+        )
 
         lease = IndexLease()
-        lease.holder_pid = os.getpid()
-        lease.acquired_at = time.time() - 120  # 2 minutes ago
-        acquire_lease(lease)  # should clear stale and succeed
-        assert lease.holder_pid == os.getpid()
-        assert time.time() - lease.acquired_at < 60
+        lease.holder_pid = os.getppid()  # alive, and not us
+        lease.acquired_at = time.time() - 3 * 3600
+        with pytest.raises(LeaseContentionError):
+            acquire_lease(lease)
+        assert lease.holder_pid == os.getppid()
 
     def test_fresh_lease_not_cleared(self):
         _requires_journal()

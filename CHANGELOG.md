@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent indexers can no longer corrupt the vector index / 并发索引不再损坏向量索引** ——
+  索引租约改为操作系统文件锁（`index_lease.lock`，`flock`/`msvcrt`），在整个索引过程中持有，
+  进程退出或崩溃时由内核释放；不再有 60 秒过期规则。租约在 `index_all_libraries` 中获取，
+  因此 `zotpilot index`（此前完全不取租约）与 MCP `index_library` 互斥；被占用时 CLI 返回 1、
+  MCP 返回 `ToolError`，并注明持有者 PID。非持有者不再能清除他人的租约记录。
+
+  The indexing lease is now an OS file lock held for the whole run and released by the
+  kernel if the holder exits or crashes, instead of a JSON lease that counted as stale after
+  60 s. It is taken inside `index_all_libraries`, so `zotpilot index` (which previously took
+  no lease) and MCP `index_library` exclude each other; a blocked run exits 1 (CLI) or raises
+  `ToolError` (MCP) naming the holder's PID. A contending caller can no longer clear the
+  holder's lease record. Cause: an MCP `index_library` run kept writing after its client
+  timed out, a CLI run started beside it, and the two writers corrupted `chunks_bge`'s HNSW
+  segment (2026-09-28).
+
 ### Changed
 
 - **API keys move to `~/.secrets.env` / API key 统一存放在 `~/.secrets.env`** —— 密钥不再写入
