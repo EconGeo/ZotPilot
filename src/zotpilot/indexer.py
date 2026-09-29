@@ -155,7 +155,13 @@ def _index_all_libraries_locked(
 
     agg_results: list = []
     # already_indexed is computed once after the loop from the store; don't sum it.
-    summed = {"indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "skipped_long": 0}
+    summed = {
+        "indexed": 0, "failed": 0, "empty": 0, "skipped": 0, "skipped_long": 0,
+        "total_to_index": 0, "vision_pending_tables": 0,
+    }
+    vision_estimated_cost_usd = 0.0
+    vision_budget_skipped = False
+    vision_skip_reasons: list[str] = []
     agg_quality_distribution: dict[str, int] = {}
     agg_extraction_stats: dict[str, int] = {}
     long_documents: list = []
@@ -186,6 +192,10 @@ def _index_all_libraries_locked(
         agg_results.extend(res.get("results", []))
         for k in summed:
             summed[k] += res.get(k, 0)
+        vision_estimated_cost_usd += res.get("vision_estimated_cost_usd", 0.0)
+        vision_budget_skipped = vision_budget_skipped or res.get("vision_budget_skipped", False)
+        if res.get("vision_skip_reason"):
+            vision_skip_reasons.append(res["vision_skip_reason"])
         long_documents.extend(res.get("long_documents", []))
         skipped_no_pdf.extend(res.get("skipped_no_pdf", []))
 
@@ -227,6 +237,10 @@ def _index_all_libraries_locked(
     out["skipped_no_pdf"] = skipped_no_pdf
     out["quality_distribution"] = agg_quality_distribution
     out["extraction_stats"] = agg_extraction_stats
+    out["vision_estimated_cost_usd"] = vision_estimated_cost_usd
+    out["vision_budget_skipped"] = vision_budget_skipped
+    if vision_skip_reasons:
+        out["vision_skip_reason"] = "; ".join(vision_skip_reasons)
     return out
 
 

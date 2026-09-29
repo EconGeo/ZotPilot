@@ -353,3 +353,33 @@ def test_quality_distribution_and_extraction_stats_are_aggregated(tmp_path, monk
     es = result.get("extraction_stats")
     assert es is not None, "extraction_stats missing from aggregate result"
     assert es.get("total_pages", 0) == 30
+
+
+def test_vision_budget_fields_are_aggregated_across_libraries(monkeypatch):
+    """index_library's summary reports vision cost/skip state; the orchestrator must not drop it."""
+    from unittest.mock import MagicMock
+
+    from zotpilot import indexer as indexer_mod
+
+    per_library = [
+        {"vision_pending_tables": 12, "vision_estimated_cost_usd": 0.12,
+         "vision_budget_skipped": True, "vision_skip_reason": "table cap 5", "total_to_index": 3},
+        {"vision_pending_tables": 4, "vision_estimated_cost_usd": 0.04,
+         "vision_budget_skipped": False, "total_to_index": 2},
+    ]
+    idxrs = iter(MagicMock(index_all=MagicMock(return_value=r), store=None) for r in per_library)
+
+    monkeypatch.setattr(indexer_mod, "enumerate_indexable_libraries", lambda config: [(1, "u"), (2, "g")])
+    monkeypatch.setattr(indexer_mod, "global_pdf_doc_ids", lambda config: set())
+    monkeypatch.setattr(indexer_mod, "Indexer", lambda config, library_id: next(idxrs))
+
+    out = indexer_mod._index_all_libraries_locked(
+        MagicMock(), force_reindex=False, limit=None, item_key=None, item_keys=None,
+        title_pattern=None, max_pages=0, batch_size=None, journal=None,
+    )
+
+    assert out["vision_pending_tables"] == 16
+    assert out["vision_estimated_cost_usd"] == pytest.approx(0.16)
+    assert out["vision_budget_skipped"] is True
+    assert out["vision_skip_reason"] == "table cap 5"
+    assert out["total_to_index"] == 5
