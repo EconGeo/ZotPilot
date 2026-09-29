@@ -152,7 +152,7 @@ async function runSaveCycle({ command, completionFn, fetchOverride } = {}) {
 	const patchedReceive = Zotero.Messaging.receiveMessage;
 
 	if (completionFn) {
-		await completionFn(patchedSend, patchedReceive);
+		await completionFn(patchedSend, patchedReceive, clock);
 	} else {
 		// Default: include an item key so second-handshake does not block the test
 		patchedSend('progressWindow.itemProgress',
@@ -517,16 +517,13 @@ describe('AgentAPI', function() {
 				'item_key should be discovered from the Zotero local API');
 		});
 
-		it('falls back to the first new item when local API discovery is ambiguous', async function() {
-			let recentItemsResponses = [
-				[makeRecentItem('OLDKEY001', 'Old Paper')],
-				[
-					makeRecentItem('NEWKEY111', 'First Different Title'),
-					makeRecentItem('NEWKEY222', 'Second Different Title'),
-					makeRecentItem('OLDKEY001', 'Old Paper'),
-				],
-			];
+		/**
+		 * Save cycle whose second handshake sees `snapshots` in turn (the last one
+		 * repeats), with the translator reporting `savedTitle` and no item key.
+		 */
+		async function runHandshake({ snapshots, savedTitle, library }) {
 			let resultPosted = null;
+			const urls = [];
 			const fetchOverride = sinon.stub().callsFake((url, opts) => {
 				if (url.includes('/pending')) {
 					return Promise.resolve({
@@ -535,12 +532,14 @@ describe('AgentAPI', function() {
 						json: () => Promise.resolve({
 							action: 'save',
 							url: 'https://example.com/paper',
-							request_id: 'req-ambiguous',
+							request_id: 'req-handshake',
+							...(library ? { library } : {}),
 						}),
 					});
 				}
-				if (url.includes('/api/users/0/items/top')) {
-					let payload = recentItemsResponses.shift() || [];
+				if (url.includes('/items/top')) {
+					urls.push(url);
+					let payload = snapshots.length > 1 ? snapshots.shift() : snapshots[0];
 					return Promise.resolve({
 						status: 200,
 						ok: true,
@@ -556,17 +555,84 @@ describe('AgentAPI', function() {
 
 			await runSaveCycle({
 				fetchOverride,
-				completionFn: async (patchedSend) => {
+				completionFn: async (patchedSend, patchedReceive, clock) => {
 					patchedSend('progressWindow.itemProgress',
-						{ title: 'Saved Paper' }, { id: 42 }, 0);
+						{ title: savedTitle }, { id: 42 }, 0);
 					patchedSend('progressWindow.done', [true], { id: 42 }, 0);
 					await flush();
+					for (let i = 0; i < 46; i++) {
+						await clock.tickAsync(1000);
+						await flush();
+					}
 				},
+			});
+			return { resultPosted, urls };
+		}
+
+		it('never guesses among several new items with other titles', async function() {
+			const { resultPosted } = await runHandshake({
+				savedTitle: 'Saved Paper',
+				snapshots: [
+					[makeRecentItem('OLDKEY001', 'Old Paper')],
+					[
+						makeRecentItem('NEWKEY111', 'First Different Title'),
+						makeRecentItem('NEWKEY222', 'Second Different Title'),
+						makeRecentItem('OLDKEY001', 'Old Paper'),
+					],
+				],
 			});
 
 			assert.isNotNull(resultPosted, 'result should be posted');
-			assert.strictEqual(resultPosted.item_key, 'NEWKEY111',
-				'item_key should fall back to the first new candidate when ambiguous');
+			assert.isNull(resultPosted.item_key,
+				'an ambiguous handshake must leave identification to ZotPilot');
+		});
+
+		it('rejects a single new item whose title is a different paper', async function() {
+			const { resultPosted } = await runHandshake({
+				savedTitle: 'Saved Paper',
+				snapshots: [
+					[],
+					[makeRecentItem('PREVKEY', 'Previous Paper')],
+				],
+			});
+
+			assert.isNotNull(resultPosted, 'result should be posted');
+			assert.isNull(resultPosted.item_key,
+				'an unrelated new item must not be reported as this save');
+		});
+
+		it('picks the title-matching item among several new ones', async function() {
+			const { resultPosted } = await runHandshake({
+				savedTitle: 'Saved Paper',
+				snapshots: [
+					[],
+					[makeRecentItem('PREVKEY', 'Previous Paper'), makeRecentItem('NEWKEY', 'Saved Paper')],
+				],
+			});
+
+			assert.strictEqual(resultPosted.item_key, 'NEWKEY');
+		});
+
+		it('looks the item up in the library named by the command', async function() {
+			const { resultPosted, urls } = await runHandshake({
+				savedTitle: 'Saved Paper',
+				library: 'groups/6075488',
+				snapshots: [[], [makeRecentItem('GRPKEY', 'Saved Paper')]],
+			});
+
+			assert.strictEqual(resultPosted.item_key, 'GRPKEY');
+			assert.isTrue(urls.every((u) => u.startsWith('http://127.0.0.1:23119/api/groups/6075488/items/top')));
+		});
+
+		it('ignores a malformed library and uses My Library', async function() {
+			const { urls } = await runHandshake({
+				savedTitle: 'Saved Paper',
+				library: '../users/99',
+				snapshots: [[], [makeRecentItem('KEY', 'Saved Paper')]],
+			});
+
+			assert.isTrue(urls.length > 0);
+			assert.isTrue(urls.every((u) => u.startsWith('http://127.0.0.1:23119/api/users/0/items/top')));
 		});
 
 		it('forwards all messages to the original sendMessage handler', async function() {
@@ -765,13 +831,18 @@ describe('AgentAPI', function() {
 			await flush();
 			await clock.tickAsync(4000);
 			await flush();
-			await clock.tickAsync(20000);
+			await clock.tickAsync(20000);  // first translator wait expires
+			await flush();
+			await clock.tickAsync(5000);   // retry delay
+			await flush();
+			await clock.tickAsync(15000);  // retry's hard timeout, still no translator
 			await flush();
 
 			Zotero.AgentAPI.destroy();
 			clock.restore();
 
-			assert.strictEqual(Zotero.Connector_Browser.getTabInfo.callCount, 1);
+			assert.isFalse(Zotero.Connector_Browser.onZoteroButtonElementClick.called,
+				'must not save a page Zotero cannot translate');
 			assert.isNotNull(resultPosted, 'bridge should receive a no_translator result');
 			assert.strictEqual(resultPosted.success, false);
 			assert.strictEqual(resultPosted.error_code, 'no_translator');
