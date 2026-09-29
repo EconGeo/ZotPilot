@@ -450,6 +450,10 @@ def _refresh_duplicate_pdf(candidate: dict, *, logger, target: IngestTarget | No
 
         doi = candidate.get("doi")
         arxiv_id = candidate.get("arxiv_id")
+        if not _conn._oa_pdf_upload_enabled():
+            return _result_from_candidate(
+                candidate, has_pdf=False, warning="Duplicate found with no PDF. " + _conn._NO_PDF_HINT,
+            )
         if not (doi or arxiv_id):
             return _result_from_candidate(candidate, warning="No PDF and no DOI/arxiv to fetch OA fallback.")
 

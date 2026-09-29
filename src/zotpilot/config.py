@@ -144,6 +144,11 @@ class Config:
     collection_name: str = "chunks"
     # Chunker backend: "char" (default, character-based) or "llamaindex" (sentence-aware)
     chunker_backend: str = "char"
+    # Upload open-access PDFs through the Zotero Web API when the connector
+    # saved no PDF. Off by default: the upload uses Zotero cloud file storage
+    # (and fails once it is full); Zotero Desktop's "Find Available PDF"
+    # stores the file locally instead.
+    oa_pdf_upload: bool = False
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -239,6 +244,7 @@ class Config:
             semantic_scholar_api_key=data.get("semantic_scholar_api_key"),
             collection_name=data.get("collection_name", "chunks"),
             chunker_backend=chunker_backend,
+            oa_pdf_upload=bool(data.get("oa_pdf_upload", False)),
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -289,6 +295,7 @@ class Config:
             "zotero_library_type": self.zotero_library_type,
             "collection_name": self.collection_name,
             "chunker_backend": self.chunker_backend,
+            "oa_pdf_upload": self.oa_pdf_upload,
         }
         data = {
             key: value for key, value in data.items()

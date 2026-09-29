@@ -586,3 +586,64 @@ def test_personal_target_ignores_a_group_override(monkeypatch, tmp_path):
         assert writer._zot.library_type == "users" and writer._zot.library_id == "42"
     finally:
         ingestion_tool._clear_target_caches()
+
+
+# ---------------------------------------------------------------------------
+# Open-access PDF upload through the Web API is off unless configured
+# ---------------------------------------------------------------------------
+
+def test_oa_pdf_upload_defaults_off(tmp_path):
+    from zotpilot.config import Config
+
+    assert Config.load(tmp_path / "missing.json").oa_pdf_upload is False
+    (tmp_path / "on.json").write_text('{"oa_pdf_upload": true}')
+    assert Config.load(tmp_path / "on.json").oa_pdf_upload is True
+
+
+def test_connector_save_skips_web_api_pdf_upload_when_off():
+    writer = MagicMock()
+    with patch.object(connector, "_oa_pdf_upload_enabled", return_value=False), \
+         patch.object(connector, "enqueue_save_request", return_value=("r1", None)), \
+         patch.object(connector, "poll_single_save_result",
+                      return_value={"success": True, "item_key": "CUR"}), \
+         patch.object(connector, "_fetch_item_via_local_api",
+                      return_value={"itemType": "journalArticle", "title": "T", "DOI": "10.1/cur"}), \
+         patch.object(connector, "_cleanup_publisher_tags"), \
+         patch.object(connector, "check_pdf_status", return_value="none"):
+        result = connector.save_single_and_verify(
+            "https://doi.org/10.1/cur", "10.1/cur", "T",
+            collection_key=None, tags=None, bridge_url="b",
+            get_writer=lambda: writer, writer_lock=MagicMock(),
+        )
+    writer.try_attach_oa_pdf.assert_not_called()
+    assert result["status"] == "saved_metadata_only"
+    assert "Find Available PDF" in result["warning"]
+
+
+def test_api_save_skips_web_api_pdf_upload_when_off():
+    writer = MagicMock()
+    writer.create_item_from_metadata.return_value = {"successful": {"0": {"key": "NEW"}}}
+    resolver = MagicMock()
+    resolver.resolve.return_value = MagicMock(abstract="a", title="T", doi="10.1/x", oa_url=None, arxiv_id=None)
+    with patch.object(connector, "_oa_pdf_upload_enabled", return_value=False), \
+         patch("zotpilot.state._get_resolver", return_value=resolver), \
+         patch.object(connector, "_cleanup_publisher_tags"):
+        result = connector.save_via_api(
+            {"paper": {"doi": "10.1000/x"}, "_index": 0}, None, None,
+            MagicMock(), writer, MagicMock(),
+        )
+    writer.try_attach_oa_pdf.assert_not_called()
+    assert result["success"] is True and result["pdf"] is False
+
+
+def test_duplicate_refresh_skips_web_api_pdf_upload_when_off(monkeypatch):
+    writer = MagicMock()
+    monkeypatch.setattr(ingestion_tool.connector, "_oa_pdf_upload_enabled", lambda: False)
+    monkeypatch.setattr(ingestion_tool.connector, "check_pdf_status", lambda *a, **k: "none")
+    monkeypatch.setattr(ingestion_tool, "_zotero_for_target", lambda target: MagicMock())
+    monkeypatch.setattr(ingestion_tool, "_writer_for_target", lambda target: writer)
+    result = ingestion_tool._refresh_duplicate_pdf(
+        {"item_key": "DUP", "doi": "10.1/x", "status": "duplicate", "_index": 0}, logger=MagicMock(),
+    )
+    writer.try_attach_oa_pdf.assert_not_called()
+    assert result["status"] == "duplicate" and result["has_pdf"] is False

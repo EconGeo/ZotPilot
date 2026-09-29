@@ -113,6 +113,22 @@ def _local_items_url(api_prefix: str = _PERSONAL_API_PREFIX) -> str:
     return f"{_ZOTERO_LOCAL_API_BASE}/{api_prefix}/items"
 
 
+_NO_PDF_HINT = (
+    "In Zotero Desktop, right-click the item → Find Available PDF to fetch an "
+    "open-access copy into local storage."
+)
+
+
+def _oa_pdf_upload_enabled() -> bool:
+    """Whether open-access PDFs may be uploaded through the Zotero Web API (config ``oa_pdf_upload``)."""
+    from ...state import _get_config
+
+    try:
+        return bool(getattr(_get_config(), "oa_pdf_upload", False))
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -929,17 +945,19 @@ def save_via_api(
         if not item_key:
             raise ToolError("create_item_from_metadata returned no item key")
 
-        try:
-            with writer_lock:
-                attach_status = writer.try_attach_oa_pdf(
-                    item_key,
-                    doi=metadata.doi,
-                    oa_url=paper.get("oa_url") or metadata.oa_url,
-                    arxiv_id=metadata.arxiv_id,
-                )
-        except Exception as attach_exc:
-            logger.debug("PDF attach best-effort failed for %s: %s", item_key, attach_exc)
-            attach_status = "attach_failed"
+        attach_status = "disabled"
+        if _oa_pdf_upload_enabled():
+            try:
+                with writer_lock:
+                    attach_status = writer.try_attach_oa_pdf(
+                        item_key,
+                        doi=metadata.doi,
+                        oa_url=paper.get("oa_url") or metadata.oa_url,
+                        arxiv_id=metadata.arxiv_id,
+                    )
+            except Exception as attach_exc:
+                logger.debug("PDF attach best-effort failed for %s: %s", item_key, attach_exc)
+                attach_status = "attach_failed"
 
         has_pdf = attach_status == "attached"
 
@@ -1657,7 +1675,7 @@ def save_single_and_verify(
     # version has no Unpaywall record but whose arXiv preprint is free
     # (e.g. IJCV-published CLIP-Adapter resolves only via its arXiv id).
     attach_status = None
-    if pdf_status != "attached" and (doi or arxiv_id):
+    if pdf_status != "attached" and (doi or arxiv_id) and _oa_pdf_upload_enabled():
         try:
             from ...state import _get_resolver
             resolver = _get_resolver()
@@ -1705,7 +1723,7 @@ def save_single_and_verify(
         warning = (
             "PDF not attached. If Zotero still shows a translator dialog "
             "(e.g. Elsevier 'Continue'), click it to finish — do NOT re-ingest "
-            "this DOI or it will create a duplicate item."
+            "this DOI or it will create a duplicate item. Otherwise: " + _NO_PDF_HINT
         )
 
     return {"status": status, "method": "connector", "item_key": item_key,
@@ -1757,7 +1775,7 @@ def _doi_api_fallback(
         has_pdf = bool(result.get("pdf"))
         warning = f"Created from DOI metadata because the {reason}."
         if not has_pdf:
-            warning += " No open-access PDF was attached."
+            warning += " No PDF attached. " + _NO_PDF_HINT
         return {"status": "saved_with_pdf" if has_pdf else "saved_metadata_only",
                 "method": "api_fallback",
                 "item_key": result.get("item_key"), "has_pdf": has_pdf,

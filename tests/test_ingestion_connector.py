@@ -196,7 +196,8 @@ class TestSaveSingleAndVerify:
         mock_writer = MagicMock()
         mock_writer.try_attach_oa_pdf.return_value = "attached"
 
-        with patch("zotpilot.state._get_resolver", return_value=resolver):
+        with patch("zotpilot.state._get_resolver", return_value=resolver), \
+             patch("zotpilot.tools.ingestion.connector._oa_pdf_upload_enabled", return_value=True):
             result = save_single_and_verify(
                 "https://example.com/paper",
                 doi="10.1234/test",
