@@ -90,6 +90,14 @@ class VectorStore:
                 "Nothing was moved or deleted. Inspect or restore the directory, or delete it "
                 "and re-run `zotpilot index` to rebuild."
             )
+        if not self.db_path.exists():
+            # Expected on first run; otherwise usually a typo'd or relative
+            # chroma_db_path, which would silently start an empty index.
+            logger.warning(
+                "Creating a new, empty Chroma index at %s (no store existed there). "
+                "If you already have an index, check chroma_db_path in your config.",
+                self.db_path.resolve(),
+            )
         self.db_path.mkdir(parents=True, exist_ok=True)
 
         # Query embedding cache (FIFO eviction at maxsize)

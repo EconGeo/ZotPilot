@@ -13,6 +13,7 @@ import pytest
 
 from zotpilot.doctor import (
     CheckResult,
+    _check_chroma_db_path,
     _check_chromadb_index,
     _check_config_exists,
     _check_config_permissions,
@@ -136,6 +137,50 @@ class TestCheckChromaDbIndex:
 
         _, kwargs = mock_vector_store_cls.call_args
         assert kwargs.get("collection_name") == "chunks_bge"
+
+
+class TestCheckChromaDbPath:
+    def _config(self, path):
+        config = MagicMock()
+        config.chroma_db_path = path
+        return config
+
+    def test_fails_on_a_relative_path(self):
+        result = _check_chroma_db_path(self._config(Path("chroma")))
+
+        assert result.status == "fail"
+        assert "absolute" in result.message
+
+    def test_warns_when_the_store_does_not_exist_yet(self, tmp_path):
+        result = _check_chroma_db_path(self._config(tmp_path / "chroma"))
+
+        assert result.status == "warn"
+        assert str(tmp_path / "chroma") in result.message
+
+    def test_passes_on_an_existing_absolute_path(self, tmp_path):
+        (tmp_path / "chroma").mkdir()
+
+        assert _check_chroma_db_path(self._config(tmp_path / "chroma")).status == "pass"
+
+    @pytest.mark.parametrize("name", ["chroma", "missing"])
+    def test_run_checks_does_not_open_a_store_at_a_bad_path(self, name, tmp_path, monkeypatch):
+        """A health check must not create the index it is checking for."""
+        monkeypatch.chdir(tmp_path)
+        chroma = Path(name) if name == "chroma" else tmp_path / name
+        config = MagicMock()
+        config.chroma_db_path = chroma
+        config.zotero_data_dir = tmp_path
+        with (
+            patch("zotpilot.doctor.resolve_runtime_settings") as mock_resolve,
+            patch("zotpilot.doctor._check_chromadb_index") as index_check,
+        ):
+            mock_resolve.return_value = MagicMock(config=config, sources={})
+            results = run_checks(config_path=str(tmp_path / "config.json"))
+
+        index_check.assert_not_called()
+        assert not (tmp_path / name).exists()
+        index_result = next(r for r in results if r.name == "chromadb_index")
+        assert index_result.status == "warn"
 
 
 class TestCheckZoteroWebApi:

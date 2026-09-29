@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import _default_config_dir
+from .config import _default_config_dir, chroma_db_path_error
 from .runtime_settings import SECRET_FIELDS, resolve_runtime_settings
 from .secret_store import describe_backend
 from .secrets_env import describe_env_file
@@ -161,6 +161,22 @@ def _check_secret_backend(config=None, sources: dict[str, str] | None = None) ->
     return CheckResult("legacy_secret_backend", "warn", backend.detail or "No legacy secret backend available")
 
 
+def _check_chroma_db_path(config) -> CheckResult:
+    """Check that chroma_db_path is absolute and say whether an index is there."""
+    error = chroma_db_path_error(config.chroma_db_path)
+    if error:
+        return CheckResult("chroma_db_path", "fail", error)
+    path = Path(config.chroma_db_path)
+    if not path.exists():
+        return CheckResult(
+            "chroma_db_path",
+            "warn",
+            f"{path} does not exist yet; `zotpilot index` will create it. "
+            "If you already have an index, check this path for a typo.",
+        )
+    return CheckResult("chroma_db_path", "pass", str(path))
+
+
 def _check_chromadb_index(config) -> CheckResult:
     """Check ChromaDB index health."""
     try:
@@ -288,8 +304,14 @@ def run_checks(config_path: str | None = None, full: bool = False) -> list[Check
     # 5. Embedding API key
     results.append(_check_embedding_api_key(config))
 
-    # 6. ChromaDB index
-    results.append(_check_chromadb_index(config))
+    # 6. ChromaDB path + index. Opening a store creates it, so only open one
+    # that exists at a valid path: a health check must not make a new index.
+    path_check = _check_chroma_db_path(config)
+    results.append(path_check)
+    if path_check.status == "pass":
+        results.append(_check_chromadb_index(config))
+    else:
+        results.append(CheckResult("chromadb_index", "warn", "Not checked: no index at chroma_db_path (see above)"))
 
     # 7. Zotero Web API credentials
     results.append(_check_zotero_web_api(config, resolved.sources))

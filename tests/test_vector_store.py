@@ -78,6 +78,26 @@ class TestVectorStore:
         results = store.search("anything", top_k=5)
         assert results == []
 
+    def test_warns_when_creating_a_new_store(self, tmp_path, mock_embedder, caplog):
+        """A typo'd chroma_db_path must be visible, not a silent new empty index."""
+        db_path = tmp_path / "new-chroma"
+
+        with caplog.at_level("WARNING", logger="zotpilot.vector_store"):
+            VectorStore(db_path, mock_embedder)
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert str(db_path) in warnings[0].getMessage()
+
+    def test_no_warning_when_reopening_an_existing_store(self, tmp_path, mock_embedder, caplog):
+        VectorStore(tmp_path / "chroma", mock_embedder)
+        caplog.clear()
+
+        with caplog.at_level("WARNING", logger="zotpilot.vector_store"):
+            VectorStore(tmp_path / "chroma", mock_embedder)
+
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
     def test_unopenable_db_fails_loudly_and_is_untouched(self, tmp_path, mock_embedder):
         db_path = tmp_path / "chroma"
         db_path.mkdir()
