@@ -169,6 +169,14 @@ class TestBridgeServer:
         bridge.enqueue(original)
         assert "request_id" not in original
 
+    def test_stop_closes_listening_socket(self):
+        """stop() releases the listening socket, not just the serve loop."""
+        bridge = BridgeServer(port=0)
+        bridge.start()
+        sock = bridge._server.socket
+        bridge.stop()
+        assert sock.fileno() == -1
+
     def test_is_running_false_when_not_started(self):
         """is_running returns False for a port with no server."""
         assert BridgeServer.is_running(port=19999) is False
