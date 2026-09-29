@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -23,6 +24,7 @@ from ...state import (
 from ..profiles import tool_tags
 from . import connector, search
 from .models import IngestCandidate
+from .target import IngestTarget, resolve_ingest_target
 
 logger = logging.getLogger(__name__)
 _writer_lock = threading.Lock()
@@ -50,95 +52,198 @@ def _parse_json_string_list(value: Any) -> Any:
     return value
 
 # ---------------------------------------------------------------------------
-# INBOX collection cache
+# Target library: resolution, per-library clients and writers
 # ---------------------------------------------------------------------------
-_inbox_collection_key: str | None = None
+_PERSONAL_TARGET = IngestTarget(1, "user", None, "My Library")
+_group_writers: dict[str, Any] = {}
+_group_clients: dict[int, Any] = {}
+
+
+def _clear_target_caches() -> None:
+    _group_writers.clear()
+    _group_clients.clear()
+
+
+register_reset_callback(_clear_target_caches)
+
+
+def _resolve_target(library: str | None) -> IngestTarget:
+    if not (library or "").strip():
+        return _PERSONAL_TARGET
+    return resolve_ingest_target(_get_zotero(), library, user_id=_get_config().zotero_user_id)
+
+
+def _zotero_for_target(target: IngestTarget):
+    """SQLite client scoped to the target library."""
+    if target.is_personal:
+        client = _get_zotero()
+        library_id = getattr(client, "library_id", 1)
+        if not isinstance(library_id, int) or library_id == 1:
+            return client
+        # The shared client follows a library override; ingest does not.
+    client = _group_clients.get(target.local_library_id)
+    if client is None:
+        from ...zotero_client import ZoteroClient
+
+        client = ZoteroClient(_get_config().zotero_data_dir, library_id=target.local_library_id)
+        _group_clients[target.local_library_id] = client
+    return client
+
+
+def _writer_for_target(target: IngestTarget):
+    """Web API writer for the target library."""
+    shared = _get_writer()  # also enforces the credential checks
+    if target.is_personal:
+        library_type = getattr(getattr(shared, "_zot", None), "library_type", "users")
+        if not isinstance(library_type, str) or library_type == "users":
+            return shared
+        # The shared writer follows a library override or a group
+        # zotero_library_type; the personal target means My Library.
+        cache_key, remote_id, library_kind = "user", str(_get_config().zotero_user_id), "user"
+    else:
+        cache_key, remote_id, library_kind = str(target.remote_id), str(target.remote_id), "group"
+    writer = _group_writers.get(cache_key)
+    if writer is None:
+        from ...zotero_writer import ZoteroWriter
+
+        writer = ZoteroWriter(_get_config().zotero_api_key, remote_id, library_kind)
+        _group_writers[cache_key] = writer
+    return writer
+
+
+def _find_recent_saves_in(
+    zotero, library_names: dict[int, str], *, dois: list[str], arxiv_id: str | None, since: datetime,
+) -> list[dict]:
+    """Items with these identifiers added to any library at or after ``since``, newest first.
+
+    Rows are ``{"key", "in_target", "library"}``, ``in_target`` meaning the
+    item is in ``zotero``'s library.
+    """
+    rows: list[dict] = []
+    for doi in dict.fromkeys(d for d in dois if d):
+        rows.extend(zotero.find_items_by_doi(doi, all_libraries=True))
+    if arxiv_id:
+        rows.extend(zotero.find_items_by_arxiv_id(arxiv_id, all_libraries=True))
+    found: dict[str, dict] = {}
+    for row in sorted(rows, key=lambda r: r["date_added"] or "", reverse=True):
+        try:
+            added = datetime.strptime(row["date_added"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if added < since or row["key"] in found:
+            continue
+        found[row["key"]] = {
+            "key": row["key"],
+            "in_target": row["library_id"] == zotero.library_id,
+            "library": library_names.get(row["library_id"], f"library {row['library_id']}"),
+        }
+    return list(found.values())
+
+
+# ---------------------------------------------------------------------------
+# INBOX collection cache (one INBOX per library)
+# ---------------------------------------------------------------------------
+_inbox_collection_keys: dict[str, str] = {}
 _inbox_lock = threading.Lock()
 _INBOX_COLLECTION_NAME = "INBOX"
 
 
 def _clear_inbox_cache() -> None:
-    global _inbox_collection_key
-    _inbox_collection_key = None
-    import sys as _sys
-    _pkg = _sys.modules.get("zotpilot.tools.ingestion")
-    if _pkg is not None and hasattr(_pkg, "_inbox_collection_key"):
-        _pkg._inbox_collection_key = None  # type: ignore[attr-defined]
+    _inbox_collection_keys.clear()
 
 
 register_reset_callback(_clear_inbox_cache)
 
 
-def _ensure_inbox_collection() -> str | None:
-    """Return the INBOX collection key, creating it if absent when possible."""
-    global _inbox_collection_key
-    if _inbox_collection_key is not None:
-        return _inbox_collection_key
+def _ensure_inbox_collection(target: IngestTarget | None = None) -> str | None:
+    """Return the target library's INBOX collection key, creating it if absent when possible."""
+    target = target or _PERSONAL_TARGET
+    cache_key = "user" if target.is_personal else f"group:{target.remote_id}"
+    if cache_key in _inbox_collection_keys:
+        return _inbox_collection_keys[cache_key]
     with _inbox_lock:
-        if _inbox_collection_key is not None:
-            return _inbox_collection_key
+        if cache_key in _inbox_collection_keys:
+            return _inbox_collection_keys[cache_key]
         try:
-            writer = _get_writer()
+            writer = _writer_for_target(target)
         except Exception:
             return None
         if not _get_config().zotero_api_key:
             return None
+
+        def _remember(key: str | None) -> str | None:
+            if key:
+                _inbox_collection_keys[cache_key] = key
+            return key
+
         try:
             with _writer_lock:
                 collections = writer._zot.collections()
             for coll in collections:
                 data = coll.get("data", {})
                 if data.get("name") == _INBOX_COLLECTION_NAME:
-                    _inbox_collection_key = data.get("key") or coll.get("key")
-                    return _inbox_collection_key
+                    return _remember(data.get("key") or coll.get("key"))
             with _writer_lock:
                 response = writer._zot.create_collections([{"name": _INBOX_COLLECTION_NAME}])
             if response and "successful" in response:
                 for value in response["successful"].values():
-                    _inbox_collection_key = value.get("key") or value.get("data", {}).get("key")
-                    if _inbox_collection_key:
-                        return _inbox_collection_key
+                    key = _remember(value.get("key") or value.get("data", {}).get("key"))
+                    if key:
+                        return key
             with _writer_lock:
                 collections = writer._zot.collections()
             for coll in collections:
                 data = coll.get("data", {})
                 if data.get("name") == _INBOX_COLLECTION_NAME:
-                    _inbox_collection_key = data.get("key") or coll.get("key")
-                    return _inbox_collection_key
+                    return _remember(data.get("key") or coll.get("key"))
         except Exception as exc:
             logger.warning("_ensure_inbox_collection failed: %s", exc)
     return None
 
 
 _RECENT_SAVES_TTL_S = 900.0  # 15 min
-_RECENT_SAVES: dict[str, tuple[str, float]] = {}
+_RECENT_SAVES: dict[tuple[Any, str], tuple[str, float]] = {}
 _PREFLIGHT_PASS_TTL_S = 900.0  # 15 min
 _PREFLIGHT_PASSES: dict[str, float] = {}
 
 
-def _remember_recent_save(key: str | None, item_key: str | None) -> None:
+def _recent_save_key(zotero, key: str) -> tuple[Any, str]:
+    return (getattr(zotero, "library_id", 1), key.lower().strip())
+
+
+def _remember_recent_save(key: str | None, item_key: str | None, zotero=None) -> None:
     """Remember a just-saved (DOI or arXiv) → item_key for short-term dedup.
 
-    Zotero Desktop writes items to SQLite only after the user confirms a
-    translator dialog (Elsevier 'Continue' etc.). During that wait the
-    existing `_lookup_local_item_key_by_doi` call sees nothing, so an
-    agent-side retry of the same ingest would create a duplicate item.
-    This in-process cache plugs that gap within the current MCP session.
+    Covers the moment between a Connector save and the item becoming visible
+    to the SQLite dedup lookup, so an agent-side retry of the same ingest does
+    not create a duplicate item. Keyed by library: a save into one library is
+    not a duplicate of the same paper in another.
     """
     if not (key and item_key):
         return
-    _RECENT_SAVES[key.lower().strip()] = (item_key, time.monotonic())
+    zotero = zotero if zotero is not None else _get_zotero()
+    _RECENT_SAVES[_recent_save_key(zotero, key)] = (item_key, time.monotonic())
 
 
-def _lookup_recent_save(key: str | None) -> str | None:
+def _lookup_recent_save(key: str | None, zotero) -> str | None:
+    """A remembered save, if it is recent and the item still exists."""
     if not key:
         return None
-    entry = _RECENT_SAVES.get(key.lower().strip())
+    cache_key = _recent_save_key(zotero, key)
+    entry = _RECENT_SAVES.get(cache_key)
     if not entry:
         return None
     item_key, saved_at = entry
     if time.monotonic() - saved_at > _RECENT_SAVES_TTL_S:
-        _RECENT_SAVES.pop(key.lower().strip(), None)
+        _RECENT_SAVES.pop(cache_key, None)
+        return None
+    try:
+        exists = bool(zotero.item_key_exists(item_key))
+    except Exception:
+        exists = True  # cannot check; the cache is the only guard left
+    if not exists:
+        # Deleted (or moved) since it was saved — never report it as a duplicate
+        _RECENT_SAVES.pop(cache_key, None)
         return None
     return item_key
 
@@ -161,27 +266,26 @@ def _has_recent_preflight_pass(url: str | None) -> bool:
     return True
 
 
-def _lookup_local_item_key_by_doi(doi: str | None) -> str | None:
-    """Check if a DOI already exists in the local Zotero library.
+def _lookup_local_item_key_by_doi(doi: str | None, zotero=None) -> str | None:
+    """Check if a DOI already exists in a local Zotero library (default: personal).
 
-    Falls back to the in-process recent-saves cache because Zotero Desktop
-    does not commit items to SQLite until the user dismisses a translator
-    dialog (e.g. Elsevier verification). Without this fallback, an agent
-    retry while the dialog is still open would create a duplicate item.
+    Falls back to the in-process recent-saves cache for a save that SQLite
+    does not show yet (see _remember_recent_save).
     """
     if not doi:
         return None
     try:
-        zotero = _get_zotero()
+        zotero = zotero if zotero is not None else _get_zotero()
         found = zotero.get_item_key_by_doi(doi)
         if found:
             return found
     except Exception:
-        pass
-    return _lookup_recent_save(doi)
+        if zotero is None:
+            return None
+    return _lookup_recent_save(doi, zotero)
 
 
-def _lookup_local_item_key_by_arxiv_extra(arxiv_id: str | None) -> str | None:
+def _lookup_local_item_key_by_arxiv_extra(arxiv_id: str | None, zotero=None) -> str | None:
     """Check whether an arXiv ID appears in a local Zotero item's extra field.
 
     Falls back to the in-process recent-saves cache (see _lookup_recent_save)
@@ -190,13 +294,14 @@ def _lookup_local_item_key_by_arxiv_extra(arxiv_id: str | None) -> str | None:
     if not arxiv_id:
         return None
     try:
-        zotero = _get_zotero()
+        zotero = zotero if zotero is not None else _get_zotero()
         found = zotero.get_item_key_by_arxiv_id(arxiv_id)
         if found:
             return found
     except Exception:
-        pass
-    return _lookup_recent_save(arxiv_id)
+        if zotero is None:
+            return None
+    return _lookup_recent_save(arxiv_id, zotero)
 
 
 def _normalize_arxiv_id(arxiv_id: str | None) -> str | None:
@@ -315,7 +420,7 @@ def _identifiers_to_internal(identifiers: list[str]) -> list[dict]:
     return internal
 
 
-def _refresh_duplicate_pdf(candidate: dict, *, logger) -> dict:
+def _refresh_duplicate_pdf(candidate: dict, *, logger, target: IngestTarget | None = None) -> dict:
     """Return a result for a duplicate-detected candidate.
 
     If the existing item already has a PDF, report `has_pdf=True`. Otherwise
@@ -327,13 +432,17 @@ def _refresh_duplicate_pdf(candidate: dict, *, logger) -> dict:
     item_key = candidate.get("item_key")
     if not item_key:
         return _result_from_candidate(candidate)
+    target = target or _PERSONAL_TARGET
 
     try:
         from ...state import _get_resolver
         from . import connector as _conn
 
+        zotero = _zotero_for_target(target)
         pdf_status = _conn.check_pdf_status(
-            item_key, get_writer=_get_writer, timeout_s=5.0, _logger=logger,
+            item_key, get_writer=lambda: _writer_for_target(target), timeout_s=5.0,
+            api_prefix=target.api_prefix, has_pdf_locally=zotero.item_has_pdf_attachment,
+            _logger=logger,
         )
         has_pdf = pdf_status == "attached"
         if has_pdf:
@@ -348,7 +457,7 @@ def _refresh_duplicate_pdf(candidate: dict, *, logger) -> dict:
         metadata = _get_resolver().resolve(resolve_id)
         effective_arxiv = metadata.arxiv_id or arxiv_id
         with _writer_lock:
-            attach_status = _get_writer().try_attach_oa_pdf(
+            attach_status = _writer_for_target(target).try_attach_oa_pdf(
                 item_key,
                 doi=metadata.doi or doi,
                 oa_url=metadata.oa_url,
@@ -402,14 +511,14 @@ def _result_from_candidate(
     }
 
 
-def _lookup_existing_item_key(candidate: dict) -> str | None:
+def _lookup_existing_item_key(candidate: dict, zotero=None) -> str | None:
     doi = candidate.get("source_doi") or candidate.get("doi")
-    item_key = _lookup_local_item_key_by_doi(doi)
+    item_key = _lookup_local_item_key_by_doi(doi, zotero=zotero)
     if item_key:
         return item_key
     arxiv_id = candidate.get("arxiv_id")
     if arxiv_id:
-        return _lookup_local_item_key_by_arxiv_extra(arxiv_id)
+        return _lookup_local_item_key_by_arxiv_extra(arxiv_id, zotero=zotero)
     return None
 
 
@@ -568,11 +677,21 @@ def ingest_by_identifiers(
             "backward compatibility. Use candidates= instead."
         )),
     ] = None,
+    library: Annotated[
+        str | None,
+        Field(description=(
+            "Zotero library to save into: omit (or 'user') for My Library, or a "
+            "group library's name or group ID. The browser connector saves into "
+            "the library selected in Zotero Desktop, so that library (or a "
+            "collection in it) must be selected there; otherwise nothing is "
+            "saved and action_required says what to select."
+        )),
+    ] = None,
 ) -> dict:
-    """Ingest papers into Zotero's INBOX collection. Per-paper status, synchronous.
+    """Ingest papers into a Zotero library's INBOX collection. Per-paper status, synchronous.
 
-    Destination and tagging are **not** caller-controlled:
-      - All new items land in the INBOX collection (auto-created on first use).
+    Destination and tagging are **not** caller-controlled beyond `library`:
+      - All new items land in that library's INBOX collection (auto-created on first use).
       - Tags are NEVER applied at save time. Topic tagging and reclassification
         happen in Phase 3 via `manage_tags` / `manage_collections` through the
         plan-then-execute workflow in ztp-research — this prevents drive-by
@@ -581,7 +700,10 @@ def ingest_by_identifiers(
     Internal flow: normalize → dedup → connector check → preflight →
     sequential save+verify → API fallback on failure → PDF check.
 
-    Statuses: saved_with_pdf, saved_metadata_only, blocked, duplicate, failed.
+    Statuses: saved_with_pdf, saved_metadata_only, saved_unconfirmed, blocked,
+    duplicate, failed. saved_unconfirmed means the browser may have saved the
+    paper but ZotPilot could not identify the item — check Zotero, never
+    re-ingest it. Results are in input order (candidate_index).
     When action_required is non-empty, surface to user and wait.
     """
     # MCP client compatibility: some clients (Qwen-based 'Sisyphus' runtimes,
@@ -631,14 +753,19 @@ def ingest_by_identifiers(
         )
 
     bridge_url = f"http://127.0.0.1:{DEFAULT_PORT}"
-    get_writer = _get_writer
     _get_zotero()
+    target = _resolve_target(library)
+    zotero = _zotero_for_target(target)
+
+    def get_writer():
+        return _writer_for_target(target)
+
     total_inputs = len(candidates) if has_candidates else len(identifiers or [])
 
-    # Destination is hardcoded to INBOX. _ensure_inbox_collection auto-creates
-    # it on first use; returns None only when ZOTERO_API_KEY is missing or the
-    # writer init fails — in that case the tool cannot function at all.
-    collection_key = _ensure_inbox_collection()
+    # Destination is the target library's INBOX. _ensure_inbox_collection
+    # auto-creates it on first use; returns None only when ZOTERO_API_KEY is
+    # missing or the writer init fails — then the tool cannot function at all.
+    collection_key = _ensure_inbox_collection(target)
     if not collection_key:
         raise ToolError(
             "INBOX collection unavailable. ingest_by_identifiers requires "
@@ -680,17 +807,17 @@ def ingest_by_identifiers(
         arxiv_id = _normalize_arxiv_id(candidate.get("arxiv_id"))
         existing_key: str | None = None
         for doi_value in doi_candidates:
-            existing_key = _lookup_local_item_key_by_doi(doi_value)
+            existing_key = _lookup_local_item_key_by_doi(doi_value, zotero=zotero)
             if existing_key:
                 break
 
         if not existing_key and arxiv_id:
             arxiv_doi_variant = _arxiv_doi(arxiv_id)
             if arxiv_doi_variant not in doi_candidates:
-                existing_key = _lookup_local_item_key_by_doi(arxiv_doi_variant)
+                existing_key = _lookup_local_item_key_by_doi(arxiv_doi_variant, zotero=zotero)
 
         if not existing_key and arxiv_id:
-            existing_key = _lookup_local_item_key_by_arxiv_extra(arxiv_id)
+            existing_key = _lookup_local_item_key_by_arxiv_extra(arxiv_id, zotero=zotero)
 
         if existing_key:
             candidate["status"] = "duplicate"
@@ -707,6 +834,32 @@ def ingest_by_identifiers(
 
     # action_required declared early — needed by both Step 4 blocking and Step 5 anti-bot
     action_required: list[dict] = []
+
+    # Step 3.5: The connector saves into the library selected in Zotero
+    # Desktop. If that is not the target, saving would file the papers in the
+    # wrong library, so stop and say what to select.
+    if ext_ok and active_candidates:
+        selected = connector.get_selected_zotero_library()
+        if selected is None:
+            logger.info("Could not read Zotero's selected library; post-save checks will catch misfiling")
+        elif selected["libraryID"] != target.local_library_id or not selected["editable"]:
+            selected_name = selected.get("libraryName") or f"library {selected['libraryID']}"
+            for candidate in active_candidates:
+                candidate["status"] = "blocked"
+                candidate["error"] = "zotero_library_mismatch"
+            action_required.append({
+                "type": "select_zotero_library",
+                "target_library": target.name,
+                "selected_library": selected_name,
+                "message": (
+                    f"Zotero Desktop is set to save into '{selected_name}'"
+                    + ("" if selected["editable"] else " (read-only)")
+                    + f", but this ingest targets '{target.name}'. In Zotero, click the "
+                    f"'{target.name}' library (or a collection inside it), then run the "
+                    "ingest again. Nothing was saved."
+                ),
+            })
+            active_candidates = []
 
     # Step 4: Preflight (if Connector online)
     if ext_ok and active_candidates:
@@ -798,9 +951,17 @@ def ingest_by_identifiers(
     for candidate in candidates_internal:
         if candidate.get("status"):
             if candidate.get("status") == "duplicate":
-                results.append(_refresh_duplicate_pdf(candidate, logger=logger))
+                results.append(_refresh_duplicate_pdf(candidate, logger=logger, target=target))
             else:
                 results.append(_result_from_candidate(candidate))
+
+    library_names: dict[int, str] | None = None
+
+    def find_recent_saves(*, dois: list[str], arxiv_id: str | None, since: datetime) -> list[dict]:
+        nonlocal library_names
+        if library_names is None:
+            library_names = zotero.get_library_names()
+        return _find_recent_saves_in(zotero, library_names, dois=dois, arxiv_id=arxiv_id, since=since)
 
     for position, candidate in enumerate(execution_plan):
         url = candidate.get("url")
@@ -816,6 +977,10 @@ def ingest_by_identifiers(
                 bridge_url=bridge_url, get_writer=get_writer,
                 writer_lock=_writer_lock, _logger=logger,
                 risk_class=risk_class,
+                api_prefix=target.api_prefix,
+                expected_dois=[candidate.get("source_doi")],
+                find_recent_saves=find_recent_saves,
+                has_pdf_locally=zotero.item_has_pdf_attachment,
             )
         elif doi:
             result = connector._doi_api_fallback(
@@ -824,6 +989,7 @@ def ingest_by_identifiers(
                 oa_url=None,
                 collection_key=collection_key, tags=None,
                 get_writer=get_writer, writer_lock=_writer_lock, _logger=logger,
+                reason="browser connector was not connected",
             )
         else:
             result = {
@@ -833,7 +999,7 @@ def ingest_by_identifiers(
             }
 
         if result.get("status") == "__manual_completion_required__":
-            existing_item_key = result.get("item_key") or _lookup_existing_item_key(candidate)
+            existing_item_key = result.get("item_key") or _lookup_existing_item_key(candidate, zotero)
             pending_candidate = dict(candidate)
             pending_candidate["existing_item_key"] = existing_item_key
             pending_candidate["item_key"] = existing_item_key
@@ -882,9 +1048,17 @@ def ingest_by_identifiers(
         }
         results.append(row)
 
-        if result.get("item_key") and result.get("status") not in {"failed", "blocked"}:
-            _remember_recent_save(candidate.get("doi"), result.get("item_key"))
-            _remember_recent_save(candidate.get("arxiv_id"), result.get("item_key"))
+        if result.get("item_key") and result.get("status") not in {"failed", "blocked", "saved_unconfirmed"}:
+            _remember_recent_save(candidate.get("doi"), result.get("item_key"), zotero=zotero)
+            _remember_recent_save(candidate.get("arxiv_id"), result.get("item_key"), zotero=zotero)
+
+        if result.get("status") == "saved_unconfirmed":
+            action_required.append({
+                "type": "save_unconfirmed",
+                "message": result.get("warning", ""),
+                "identifier": candidate.get("identifier", ""),
+                "item_key": result.get("item_key"),
+            })
 
         if result.get("status") == "blocked":
             action_required.append({
@@ -896,8 +1070,12 @@ def ingest_by_identifiers(
     if manual_completion is not None:
         action_required.append(manual_completion)
 
+    # Saves run in risk order; report them in input order.
+    results.sort(key=lambda row: (row.get("candidate_index") is None, row.get("candidate_index") or 0))
+
     return {
         "total": total_inputs,
+        "library": target.name,
         "results": results,
         "action_required": action_required,
         "completed_count": sum(

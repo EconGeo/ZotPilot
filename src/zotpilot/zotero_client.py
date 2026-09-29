@@ -649,6 +649,90 @@ class ZoteroClient:
         finally:
             conn.close()
 
+    _ITEMS_BY_FIELD_SQL = """
+        SELECT i.key, i.libraryID, i.dateAdded
+        FROM items i
+        JOIN itemData id ON id.itemID = i.itemID
+        JOIN itemDataValues idv ON idv.valueID = id.valueID
+        JOIN fields f ON f.fieldID = id.fieldID
+        WHERE f.fieldName = ?
+          AND {match}
+          AND i.itemTypeID NOT IN (1, 14)
+          AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+          {library_clause}
+        ORDER BY i.dateAdded DESC, i.itemID DESC
+    """
+
+    def _find_items_by_field(self, field: str, match: str, value: str, all_libraries: bool) -> list[dict]:
+        library_clause = "" if all_libraries else "AND i.libraryID = ?"
+        params: list = [field, value] + ([] if all_libraries else [self.library_id])
+        sql = self._ITEMS_BY_FIELD_SQL.format(match=match, library_clause=library_clause)
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+        return [{"key": r[0], "library_id": r[1], "date_added": r[2]} for r in rows]
+
+    def find_items_by_doi(self, doi: str | None, all_libraries: bool = False) -> list[dict]:
+        """Every non-deleted top-level item with this DOI, newest first.
+
+        Each row is ``{"key", "library_id", "date_added"}``; ``date_added`` is
+        Zotero's UTC ``YYYY-MM-DD HH:MM:SS``.
+        """
+        normalized = _normalize_doi_text(doi)
+        if not normalized:
+            return []
+        match = (
+            "replace(replace(replace(lower(trim(idv.value)), 'https://doi.org/', ''),"
+            " 'http://doi.org/', ''), 'doi:', '') = ?"
+        )
+        return self._find_items_by_field("DOI", match, normalized, all_libraries)
+
+    def find_items_by_arxiv_id(self, arxiv_id: str | None, all_libraries: bool = False) -> list[dict]:
+        """Every non-deleted top-level item whose extra field names this arXiv ID, newest first."""
+        normalized = _normalize_arxiv_id_text(arxiv_id)
+        if not normalized:
+            return []
+        return self._find_items_by_field(
+            "extra", "lower(idv.value) LIKE ?", f"%arxiv:{normalized.lower()}%", all_libraries,
+        )
+
+    def item_key_exists(self, item_key: str) -> bool:
+        """True if a non-deleted item with this key is in this client's library."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM items
+                WHERE key = ? AND libraryID = ?
+                  AND itemID NOT IN (SELECT itemID FROM deletedItems)
+                """,
+                (item_key, self.library_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def item_has_pdf_attachment(self, item_key: str) -> bool:
+        """True if the item in this library has a non-deleted PDF attachment."""
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM items parent
+                JOIN itemAttachments ia ON ia.parentItemID = parent.itemID
+                WHERE parent.key = ? AND parent.libraryID = ?
+                  AND ia.contentType = 'application/pdf'
+                  AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
+                """,
+                (item_key, self.library_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
     def get_notes(self, item_key: str | None = None, query: str | None = None, limit: int = 20) -> list[dict]:
         """Get notes, optionally filtered by parent item or content search."""
         conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
@@ -959,6 +1043,18 @@ class ZoteroClient:
             return results
         finally:
             conn.close()
+
+    def get_library_names(self) -> dict[int, str]:
+        """Map local libraryID to a display name (My Library plus every group)."""
+        names = {1: "My Library"}
+        conn = sqlite3.connect(_sqlite_uri(self.db_path), uri=True)
+        try:
+            if self._table_exists(conn, "groups"):
+                for library_id, name in conn.execute("SELECT libraryID, name FROM groups"):
+                    names[library_id] = name
+        finally:
+            conn.close()
+        return names
 
     ADVANCED_SEARCH_BASE_SQL = """
     SELECT

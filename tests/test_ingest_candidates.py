@@ -21,7 +21,7 @@ def ingest_env(monkeypatch):
     zotero.get_item_key_by_doi.return_value = None
     zotero.get_item_key_by_arxiv_id.return_value = None
 
-    monkeypatch.setattr(ingestion_tool, "_ensure_inbox_collection", lambda: "INBOX")
+    monkeypatch.setattr(ingestion_tool, "_ensure_inbox_collection", lambda *args, **kwargs: "INBOX")
     monkeypatch.setattr(ingestion_tool, "_get_zotero", lambda: zotero)
     monkeypatch.setattr(ingestion_tool, "_get_writer", lambda: MagicMock())
     monkeypatch.setattr(
@@ -33,6 +33,11 @@ def ingest_env(monkeypatch):
         ingestion_tool.connector,
         "run_preflight_check",
         lambda *args, **kwargs: ([], [], False),
+    )
+    monkeypatch.setattr(
+        ingestion_tool.connector,
+        "get_selected_zotero_library",
+        lambda: {"libraryID": 1, "libraryName": "My Library", "editable": True},
     )
     monkeypatch.setattr(
         ingestion_tool.connector,

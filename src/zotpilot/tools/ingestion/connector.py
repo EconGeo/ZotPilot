@@ -12,16 +12,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
+
+from ...zotero_client import _normalize_arxiv_id_text, _normalize_doi_text
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +96,21 @@ class _FakeBatch:
         pass
 
 
-_ZOTERO_LOCAL_API_ITEMS_URL = "http://127.0.0.1:23119/api/users/0/items"
+_ZOTERO_LOCAL_API_BASE = "http://127.0.0.1:23119/api"
+_ZOTERO_LOCAL_API_ITEMS_URL = f"{_ZOTERO_LOCAL_API_BASE}/users/0/items"
+_ZOTERO_CONNECTOR_URL = "http://127.0.0.1:23119/connector"
+_PERSONAL_API_PREFIX = "users/0"
+
+CONNECTOR_SAVE_DEADLINE_S = 300.0
+"""Longest the extension can spend on one save before it posts a result:
+translator waits (30 s + 5 s + 15 s), the save itself (180 s) and the
+post-save item search (45 s), plus margin. Giving up earlier does not stop
+the save — the extension finishes it anyway — so polling for less than this
+only turns a slow save into a reported failure."""
+
+
+def _local_items_url(api_prefix: str = _PERSONAL_API_PREFIX) -> str:
+    return f"{_ZOTERO_LOCAL_API_BASE}/{api_prefix}/items"
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +157,9 @@ def extract_publisher_domain(url: str) -> str:
 def _cleanup_publisher_tags(item_key: str | None, url: str, writer, _logger) -> None:
     """Clear publisher-injected tags after a successful save.
 
+    Translators save every tag as automatic (type 1); only those are removed,
+    so a manual tag survives even if ``item_key`` points at an existing item.
+
     Note: called immediately after Connector save, so pyzotero Web API may
     404 due to sync lag. This is a cosmetic cleanup — failures are logged
     at debug level since the save itself succeeded.
@@ -145,12 +167,13 @@ def _cleanup_publisher_tags(item_key: str | None, url: str, writer, _logger) -> 
     if not item_key:
         return
     try:
-        current_tags = []
-        if hasattr(writer, "_zot"):
-            item = writer._zot.item(item_key)
-            current_tags = list((item.get("data") or {}).get("tags") or [])
-        writer.set_item_tags(item_key, [])
-        _logger.info("Cleared %d publisher auto-tags for %s", len(current_tags), item_key)
+        item = writer._zot.item(item_key)
+        current_tags = list((item.get("data") or {}).get("tags") or [])
+        automatic = [t for t in current_tags if t.get("type") == 1]
+        if not automatic:
+            return
+        writer.set_item_tags(item_key, [t["tag"] for t in current_tags if t.get("type") != 1])
+        _logger.info("Cleared %d publisher auto-tags for %s", len(automatic), item_key)
     except Exception as exc:
         _logger.debug("Skipped publisher tag cleanup for %s (likely sync lag): %s",
                       item_key, exc)
@@ -432,12 +455,19 @@ def enqueue_save_request(
     url: str,
     collection_key: str | None = None,
     tags: list[str] | None = None,
+    library: str | None = None,
 ) -> tuple[str | None, dict | None]:
-    """Enqueue one bridge save request."""
+    """Enqueue one bridge save request.
+
+    ``library`` is the local-API prefix (``users/0``, ``groups/<id>``) the
+    extension should search for the new item; older extensions ignore it.
+    """
     command = {
         "action": "save", "url": url,
         "collection_key": collection_key, "tags": tags or [],
     }
+    if library:
+        command["library"] = library
     try:
         request = urllib.request.Request(
             f"{bridge_url}/enqueue",
@@ -733,13 +763,23 @@ def resolve_dois_concurrent(dois: list[str]) -> dict[str, str | None]:
 # (subject to Desktop sync lag, but actually works).
 
 
-def discover_item_via_local_api(url: str, title: str | None) -> str | None:
-    """Try to discover a newly saved item via Zotero Desktop local API."""
+def discover_item_via_local_api(
+    url: str,
+    title: str | None,
+    *,
+    api_prefix: str = _PERSONAL_API_PREFIX,
+    since: datetime | None = None,
+) -> str | None:
+    """Try to discover a newly saved item via Zotero Desktop local API.
+
+    Only items added at or after ``since`` count, so an older copy with the
+    same title is never mistaken for the one just saved.
+    """
     if not title:
         return None
     try:
         search_url = (
-            f"{_ZOTERO_LOCAL_API_ITEMS_URL}/top?format=json&limit=5"
+            f"{_local_items_url(api_prefix)}/top?format=json&limit=5"
             f"&q={urllib.parse.quote(title[:50])}"
             f"&qmode=titleCreatorYear&sort=dateAdded&direction=desc"
         )
@@ -749,6 +789,8 @@ def discover_item_via_local_api(url: str, title: str | None) -> str | None:
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             items = json.loads(resp.read())
+        if since is not None:
+            items = [item for item in items if _added_since(item, since)]
         if len(items) == 1:
             key = items[0].get("key")
             return str(key) if key is not None else None
@@ -760,6 +802,50 @@ def discover_item_via_local_api(url: str, title: str | None) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _added_since(item: dict, since: datetime) -> bool:
+    """True if a local-API item payload was added at or after ``since``."""
+    data = item.get("data", item) if isinstance(item, dict) else {}
+    raw = data.get("dateAdded") or ""
+    try:
+        added = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if added.tzinfo is None:
+        added = added.replace(tzinfo=timezone.utc)
+    return added >= since
+
+
+def get_selected_zotero_library(timeout_s: float = 3.0) -> dict | None:
+    """Return the library Zotero Desktop is currently saving into, or None.
+
+    The browser connector saves into whatever is selected in Zotero's
+    collection pane, so an ingest aimed at a specific library checks this
+    first. Uses the connector server's ``getSelectedCollection`` endpoint,
+    the same call the connector's own save popup makes; it creates no save
+    session. Returns ``{"libraryID", "libraryName", "editable", "collection"}``.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{_ZOTERO_CONNECTOR_URL}/getSelectedCollection",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            payload = json.loads(resp.read())
+    except Exception as exc:
+        logger.debug("getSelectedCollection failed: %s", exc)
+        return None
+    if not isinstance(payload, dict) or "libraryID" not in payload:
+        return None
+    return {
+        "libraryID": payload["libraryID"],
+        "libraryName": payload.get("libraryName") or "",
+        "editable": bool(payload.get("editable", True)),
+        "collection": payload.get("name") if payload.get("id") else None,
+    }
 
 
 def discover_item_via_web_api(
@@ -880,6 +966,7 @@ def _fetch_item_via_local_api(
     *,
     timeout_s: float = 5.0,
     max_retries: int = 3,
+    api_prefix: str = _PERSONAL_API_PREFIX,
     _logger=None,
 ) -> dict | None:
     """Fetch item data from local Zotero Desktop HTTP API (port 23119).
@@ -891,7 +978,7 @@ def _fetch_item_via_local_api(
     """
     if _logger is None:
         _logger = logger
-    url = f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}"
+    url = f"{_local_items_url(api_prefix)}/{item_key}"
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(
@@ -920,6 +1007,7 @@ def validate_saved_item(
     item_key: str,
     *,
     get_writer,
+    api_prefix: str = _PERSONAL_API_PREFIX,
     _logger=None,
 ) -> dict:
     """验证 Connector save 后的 item 质量。
@@ -927,13 +1015,14 @@ def validate_saved_item(
     优先使用本地 Zotero Desktop API (port 23119) — 无同步延迟。
     仅当本地 API 完全不可用时，降级到 pyzotero Web API（有 ~10s 同步延迟）。
 
-    返回 {"valid": bool, "item_type": str, "title": str, "reason": str | None}。
+    返回 {"valid": bool, "item_type": str, "title": str, "reason": str | None,
+    "data": dict}；``data`` is the item payload, for the identity check.
     """
     if _logger is None:
         _logger = logger
 
     # Primary path: local Zotero API (instant after Connector save)
-    data = _fetch_item_via_local_api(item_key, _logger=_logger)
+    data = _fetch_item_via_local_api(item_key, api_prefix=api_prefix, _logger=_logger)
     source = "local_api"
 
     # Fallback: Web API (only if local API unavailable, e.g. Zotero closed)
@@ -956,23 +1045,64 @@ def validate_saved_item(
     _logger.debug("validate_saved_item %s via %s: type=%s title=%r",
                   item_key, source, item_type, title[:50])
 
+    reason = None
     if item_type not in VALID_ACADEMIC_ITEM_TYPES:
-        return {"valid": False, "item_type": item_type, "title": title,
-                "reason": f"invalid_item_type:{item_type}"}
+        reason = f"invalid_item_type:{item_type}"
+    elif title.startswith(("http://", "https://")):
+        reason = "title_is_url"
+    elif title.lower().strip() == "snapshot":
+        reason = "title_is_snapshot"
+    elif looks_like_error_page_title(title, item_key):
+        reason = "error_page_title"
 
-    if title.startswith(("http://", "https://")):
-        return {"valid": False, "item_type": item_type, "title": title,
-                "reason": "title_is_url"}
+    return {"valid": reason is None, "item_type": item_type, "title": title,
+            "reason": reason, "data": data}
 
-    if title.lower().strip() == "snapshot":
-        return {"valid": False, "item_type": item_type, "title": title,
-                "reason": "title_is_snapshot"}
 
-    if looks_like_error_page_title(title, item_key):
-        return {"valid": False, "item_type": item_type, "title": title,
-                "reason": "error_page_title"}
+def _normalize_title(title: str | None) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", (title or "").lower()).split())
 
-    return {"valid": True, "item_type": item_type, "title": title, "reason": None}
+
+def _titles_match(expected: str, saved: str) -> bool:
+    a, b = _normalize_title(expected), _normalize_title(saved)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = sorted((a, b), key=len)
+    if len(shorter.split()) >= 3 and shorter in longer:
+        return True  # title vs. "title: subtitle"
+    short_words, long_words = set(shorter.split()), set(longer.split())
+    return len(short_words & long_words) / len(short_words) >= 0.8
+
+
+def identity_check(
+    item: dict,
+    *,
+    expected_dois: Iterable[str | None],
+    arxiv_id: str | None,
+    title: str | None,
+) -> bool | None:
+    """Is ``item`` the paper this save was for?
+
+    True/False when the DOI, arXiv ID or title settles it; None when there is
+    nothing to compare. A saved item is never reported under a candidate it
+    does not match — the extension and the title search can both pick up an
+    unrelated item that appeared in the library during the save.
+    """
+    wanted = {d for d in (_normalize_doi_text(d) for d in expected_dois) if d}
+    arxiv = _normalize_arxiv_id_text(arxiv_id)
+    if arxiv:
+        wanted.add(f"10.48550/arxiv.{arxiv.lower()}")
+        blob = " ".join(str(item.get(f) or "") for f in ("extra", "url", "archiveID")).lower()
+        if arxiv.lower() in blob:
+            return True
+    item_doi = _normalize_doi_text(item.get("DOI"))
+    if item_doi and wanted:
+        return item_doi in wanted
+    if title and item.get("title"):
+        return _titles_match(title, item["title"])
+    return None
 
 
 def delete_item_safe(
@@ -1020,16 +1150,17 @@ def _check_has_pdf_via_local_api(
     item_key: str,
     *,
     timeout_s: float = 5.0,
+    api_prefix: str = _PERSONAL_API_PREFIX,
     _logger=None,
 ) -> bool | None:
     """Check PDF attachment via local Zotero Desktop API (port 23119).
 
-    Returns True/False when local API answers, None when local API is
-    unreachable (caller should fall back to Web API).
+    Returns True/False when local API answers, None when it is unreachable or
+    does not know the item (caller should fall back to Web API).
     """
     if _logger is None:
         _logger = logger
-    url = f"{_ZOTERO_LOCAL_API_ITEMS_URL}/{item_key}/children"
+    url = f"{_local_items_url(api_prefix)}/{item_key}/children"
     try:
         req = urllib.request.Request(
             url,
@@ -1039,9 +1170,11 @@ def _check_has_pdf_via_local_api(
             payload = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            # Item exists locally but has no children yet — treat as False,
-            # retry handled by caller.
-            return False
+            # The local API answers 404 when the item is not in this library
+            # (an item with no children returns an empty list), so this says
+            # nothing about the PDF.
+            _logger.debug("local API does not know %s in %s", item_key, api_prefix)
+            return None
         _logger.debug("local API children fetch %s: HTTP %s", item_key, exc.code)
         return None
     except (urllib.error.URLError, ConnectionRefusedError, OSError) as exc:
@@ -1068,12 +1201,16 @@ def check_pdf_status(
     *,
     get_writer,
     timeout_s: float = 30.0,
+    api_prefix: str = _PERSONAL_API_PREFIX,
+    has_pdf_locally: Callable[[str], bool | None] | None = None,
     _logger=None,
 ) -> str:
     """检查 item 是否有 PDF 附件。
 
-    优先使用本地 Zotero Desktop API（无同步延迟），仅在本地 API 完全不可达
-    时降级到 pyzotero Web API（有 ~10-60s 同步延迟）。
+    ``has_pdf_locally`` (Zotero's SQLite, when the caller supplies it) is
+    checked first; then the local Zotero Desktop API (无同步延迟); the
+    pyzotero Web API (有 ~10-60s 同步延迟) only when the local API cannot
+    answer for this item.
 
     返回: "attached" | "none" | "pending" | "check_failed"
     """
@@ -1083,9 +1220,18 @@ def check_pdf_status(
     deadline = time.monotonic() + timeout_s
     local_api_unavailable = False
     while time.monotonic() < deadline:
-        # Primary path: local API (instant for Connector-saved PDFs)
+        if has_pdf_locally is not None:
+            try:
+                if has_pdf_locally(item_key):
+                    return "attached"
+            except Exception as exc:
+                _logger.debug("local PDF check for %s failed: %s", item_key, exc)
+
+        # Local API (instant for Connector-saved PDFs)
         if not local_api_unavailable:
-            local_result = _check_has_pdf_via_local_api(item_key, _logger=_logger)
+            local_result = _check_has_pdf_via_local_api(
+                item_key, api_prefix=api_prefix, _logger=_logger,
+            )
             if local_result is True:
                 return "attached"
             if local_result is None:
@@ -1108,6 +1254,44 @@ def check_pdf_status(
     return "none"
 
 
+def _manual_completion(item_key: str | None, title: str, resume_action: str, stage: str) -> dict:
+    return {
+        "status": "__manual_completion_required__",
+        "method": "connector",
+        "item_key": item_key,
+        "has_pdf": False,
+        "title": title,
+        "action_required": None,
+        "warning": None,
+        "resume_action": resume_action,
+        "timeout_stage": stage,
+    }
+
+
+def _saved_unconfirmed(reason: str, title: str, found: dict | None) -> dict:
+    """The connector may have saved the paper, but ZotPilot cannot confirm which item it is.
+
+    Never followed by a DOI-API save: the connector finishes a save even after
+    ZotPilot stops waiting, so a second copy would be a duplicate.
+    """
+    if found is not None and not found.get("in_target"):
+        item_key = found.get("key")
+        warning = (
+            f"The connector saved this paper into '{found.get('library')}', not the "
+            "library this ingest targets. Move it in Zotero; do not re-ingest this "
+            "paper or it will be saved twice."
+        )
+    else:
+        item_key = None
+        warning = (
+            f"{reason} No new item for this paper was found in the target library. "
+            "Check Zotero (a translator dialog may still be open); do not re-ingest "
+            "this paper or it may be saved twice."
+        )
+    return {"status": "saved_unconfirmed", "method": "connector", "item_key": item_key,
+            "has_pdf": False, "title": title, "action_required": None, "warning": warning}
+
+
 def save_single_and_verify(
     url: str,
     doi: str | None,
@@ -1122,20 +1306,33 @@ def save_single_and_verify(
     _logger=None,
     _retry_count: int = 0,
     risk_class: str = "normal",
+    api_prefix: str = _PERSONAL_API_PREFIX,
+    expected_dois: Iterable[str | None] | None = None,
+    find_recent_saves: Callable[..., list[dict]] | None = None,
+    has_pdf_locally: Callable[[str], bool | None] | None = None,
 ) -> dict:
     """逐条 save + 即时验证。v0.5.0 入库的核心函数。
 
     流程：
     1. enqueue_save_request (Connector)
-    2. poll_single_save_result (最多 60s)
-    3. 如果 success：validate_saved_item
+    2. poll_single_save_result (up to CONNECTOR_SAVE_DEADLINE_S)
+    3. 如果 success：validate_saved_item + identity_check against the candidate
        a. valid → apply collection/tag routing → check PDF → return saved
-       b. invalid → delete_item → save_via_api (DOI fallback) → return
+       b. invalid → delete_item → save_via_api (DOI fallback, only if deleted)
     4. 如果 anti-bot → return blocked
-    5. 其他失败 → 尝试 DOI API fallback → return
+    5. 其他失败 → look for an item the save created → else DOI API fallback
+    6. Timeout, or a reported save whose item cannot be identified →
+       ``saved_unconfirmed``; never a DOI API fallback.
+
+    ``api_prefix`` names the target library for the local API. ``get_writer``
+    must write to the same library. ``find_recent_saves(dois=, arxiv_id=,
+    since=)`` returns items added since the save started, newest first, as
+    ``{"key", "in_target", "library"}`` rows; ``has_pdf_locally(key)`` checks
+    Zotero's SQLite for a PDF.
 
     返回 dict:
-      status: "saved_with_pdf" | "saved_metadata_only" | "blocked" | "failed"
+      status: "saved_with_pdf" | "saved_metadata_only" | "saved_unconfirmed"
+              | "blocked" | "failed"
       item_key: str | None
       has_pdf: bool
       title: str
@@ -1145,72 +1342,106 @@ def save_single_and_verify(
     """
     if _logger is None:
         _logger = logger
+    title_text = title or ""
+    started_at = datetime.now(timezone.utc).replace(microsecond=0)
+    candidate_dois = [doi, *(expected_dois or [])]
+    retry_kwargs = dict(
+        arxiv_id=arxiv_id, collection_key=collection_key, tags=tags,
+        bridge_url=bridge_url, get_writer=get_writer, writer_lock=writer_lock,
+        _logger=_logger, _retry_count=1, api_prefix=api_prefix,
+        expected_dois=expected_dois, find_recent_saves=find_recent_saves,
+        has_pdf_locally=has_pdf_locally,
+    )
+
+    def _recover() -> dict | None:
+        """An item this save created, preferring one in the target library."""
+        rows: list[dict] = []
+        if find_recent_saves is not None:
+            try:
+                rows = list(find_recent_saves(
+                    dois=[d for d in candidate_dois if d], arxiv_id=arxiv_id, since=started_at,
+                ))
+            except Exception as exc:
+                _logger.debug("recent-save lookup failed for %s: %s", url, exc)
+        in_target = [row for row in rows if row.get("in_target")]
+        if in_target:
+            return in_target[0]
+        discovered = discover_item_via_local_api(url, title, api_prefix=api_prefix, since=started_at)
+        if discovered:
+            return {"key": discovered, "in_target": True}
+        return rows[0] if rows else None
+
+    def _validate_identity(item_key: str) -> dict | None:
+        """Validation result for ``item_key`` if it is this candidate's paper, else None."""
+        validation = validate_saved_item(
+            item_key, get_writer=get_writer, api_prefix=api_prefix, _logger=_logger,
+        )
+        if str(validation.get("reason") or "").startswith("validation_error"):
+            return validation  # unreadable; the caller reports it without touching it
+        data = validation.get("data") or {}
+        if not validation["valid"]:
+            # Junk (webpage / error-page item) is deleted and replaced, so it
+            # must be this save's: added after the save started. Its title
+            # cannot be expected to match.
+            return validation if _added_since(data, started_at) else None
+        same = identity_check(data, expected_dois=candidate_dois, arxiv_id=arxiv_id, title=title)
+        if same is False:
+            _logger.warning(
+                "Item %s (%r) is not the paper saved from %s — not reporting it",
+                item_key, validation.get("title", "")[:60], url,
+            )
+            return None
+        return validation
 
     # Step 1: Connector save
     request_id, enqueue_error = enqueue_save_request(
-        bridge_url, url, collection_key=collection_key, tags=tags,
+        bridge_url, url, collection_key=collection_key, tags=tags, library=api_prefix,
     )
     if enqueue_error:
         error_code = enqueue_error.get("error_code", "")
         if error_code == "extension_not_connected":
-            # Connector offline — try DOI API fallback if we have a DOI
+            # Connector offline — nothing was saved, so the DOI API cannot duplicate it
             if doi:
                 _logger.info("Connector offline for %s, trying DOI API fallback", url)
                 return _doi_api_fallback(
                     doi, title, arxiv_id=arxiv_id,
                     collection_key=collection_key, tags=tags,
                     get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
+                    reason="browser connector was offline",
                 )
             return {"status": "failed", "method": "connector",
                     "error": "connector_offline", "item_key": None, "has_pdf": False,
-                    "title": title or "", "action_required": None, "warning": None}
+                    "title": title_text, "action_required": None, "warning": None}
         return {"status": "failed", "method": "connector",
                 "error": str(enqueue_error), "item_key": None, "has_pdf": False,
-                "title": title or "", "action_required": None, "warning": None}
+                "title": title_text, "action_required": None, "warning": None}
     assert request_id is not None
 
-    # Step 2: Poll result
-    if risk_class == "manual_verification":
-        save_timeout_s = 180.0
-    elif risk_class == "access_sensitive":
-        save_timeout_s = 90.0
-    else:
-        save_timeout_s = 45.0
+    # Step 2: Poll result, for as long as the extension itself may take.
+    save_timeout_s = CONNECTOR_SAVE_DEADLINE_S
     save_result = poll_single_save_result(bridge_url, request_id, timeout_s=save_timeout_s)
 
-    # Step 2.5: Timeout recovery.
-    # Slow publishers (AIP, Cloudflare-protected sites, JS-heavy pages) can
-    # push the Connector save past our 60s poll window. The browser translator
-    # often completes the save anyway — we just miss the bridge confirmation.
-    # Falling straight to _doi_api_fallback here would lose the Connector's
-    # browser-session PDF and degrade to a metadata-only record. Instead,
-    # try to discover the newly-saved item by URL+title and upgrade the
-    # save_result so the validation path can take it from here.
+    # Step 2.5: Timeout. The save may still complete in the browser, so look
+    # for the item — but never create a second copy through the DOI API.
     if (not save_result.get("success")
             and save_result.get("status") == "timeout_likely_saved"):
-        _logger.info("Connector poll timed out for %s — attempting discovery", url)
-        discovered_key = discover_item_via_local_api(url, title)
-        if not discovered_key:
+        _logger.info("Connector poll timed out for %s — looking for the saved item", url)
+        found = _recover()
+        if found is None:
             time.sleep(5.0)  # give Zotero a few more seconds to finalize
-            discovered_key = discover_item_via_local_api(url, title)
-        if discovered_key:
-            _logger.info(
-                "Recovered timed-out Connector save: item_key=%s for %s",
-                discovered_key, url,
-            )
+            found = _recover()
+        if found is not None and found.get("in_target"):
+            _logger.info("Recovered timed-out Connector save: item_key=%s for %s", found["key"], url)
             if risk_class in {"manual_verification", "access_sensitive"}:
-                return {
-                    "status": "__manual_completion_required__",
-                    "method": "connector",
-                    "item_key": discovered_key,
-                    "has_pdf": False,
-                    "title": title or "",
-                    "action_required": None,
-                    "warning": None,
-                    "resume_action": "reconcile_existing",
-                    "timeout_stage": "save_confirmation",
-                }
-            save_result = {"success": True, "item_key": discovered_key}
+                return _manual_completion(found["key"], title_text, "reconcile_existing", "save_confirmation")
+            save_result = {"success": True, "item_key": found["key"]}
+        elif risk_class == "manual_verification" and found is None:
+            return _manual_completion(None, title_text, "retry_save", "save_confirmation")
+        else:
+            return _saved_unconfirmed(
+                f"The connector did not confirm the save within {int(save_timeout_s)}s.",
+                title_text, found,
+            )
 
     if not save_result.get("success"):
         error_text = save_result.get("error", "unknown")
@@ -1224,7 +1455,7 @@ def save_single_and_verify(
                     _logger.warning("Failed to delete anti-bot item %s — manual cleanup may be needed", ik)
             return {"status": "blocked", "method": "connector",
                     "error": "anti_bot_detected", "item_key": None, "has_pdf": False,
-                    "title": title or "",
+                    "title": title_text,
                     "action_required": "用户需在浏览器中完成验证，然后重试",
                     "warning": None}
         # Cold-start retry: Connector-side already retried _waitForReady once
@@ -1239,7 +1470,7 @@ def save_single_and_verify(
                     "error_code": error_code,
                     "item_key": None,
                     "has_pdf": False,
-                    "title": title or "",
+                    "title": title_text,
                     "action_required": None,
                     "warning": None,
                 }
@@ -1247,68 +1478,62 @@ def save_single_and_verify(
                 "no_translator after Connector retry for %s — retrying with fresh tab",
                 url,
             )
-            return save_single_and_verify(
-                url, doi, title, arxiv_id=arxiv_id,
-                collection_key=collection_key, tags=tags,
-                bridge_url=bridge_url, get_writer=get_writer,
-                writer_lock=writer_lock, _logger=_logger,
-                _retry_count=1,
-            )
+            return save_single_and_verify(url, doi, title, **retry_kwargs)
         if risk_class == "manual_verification":
-            return {
-                "status": "__manual_completion_required__",
-                "method": "connector",
-                "item_key": None,
-                "has_pdf": False,
-                "title": title or "",
-                "action_required": None,
-                "warning": None,
-                "resume_action": "retry_save",
-                "timeout_stage": "save_confirmation",
-            }
-        if doi and risk_class == "normal":
+            return _manual_completion(None, title_text, "retry_save", "save_confirmation")
+        # A failed save can still leave an item behind (Zotero reports failure
+        # after writing it); only fall back when there is none.
+        found = _recover()
+        if found is not None and found.get("in_target"):
+            _logger.info("Connector reported failure for %s but saved %s", url, found["key"])
+            save_result = {"success": True, "item_key": found["key"]}
+        elif found is not None:
+            return _saved_unconfirmed("The connector reported a failure.", title_text, found)
+        elif doi and risk_class == "normal":
             _logger.info("Connector failed for %s, trying DOI API fallback", url)
             return _doi_api_fallback(
                 doi, title, arxiv_id=arxiv_id,
                 collection_key=collection_key, tags=tags,
                 get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
+                reason=f"browser connector could not save it ({error_code or error_text})",
             )
-        return {"status": "failed", "method": "connector",
-                "error": error_text, "item_key": None, "has_pdf": False,
-                "title": title or "", "action_required": None, "warning": None}
+        else:
+            return {"status": "failed", "method": "connector",
+                    "error": error_text, "item_key": None, "has_pdf": False,
+                    "title": title_text, "action_required": None, "warning": None}
 
-    # Step 3: Connector reported success — VERIFY
+    # Step 3: Connector reported success — identify the item it saved
     item_key = save_result.get("item_key")
-    if not item_key:
-        item_key = discover_item_via_local_api(url, title)
+    validation = _validate_identity(item_key) if item_key else None
+    found = None
+    if validation is None:
+        item_key = None
+        found = _recover()
+        if found is not None and found.get("in_target"):
+            validation = _validate_identity(found["key"])
+            if validation is not None:
+                item_key = found["key"]
 
-    if not item_key:
-        _logger.warning("Connector success but no item_key for %s", url)
+    if not item_key or validation is None:
+        _logger.warning("Connector save for %s: saved item not identified", url)
         if risk_class in {"manual_verification", "access_sensitive"}:
-            return {
-                "status": "__manual_completion_required__",
-                "method": "connector",
-                "item_key": None,
-                "has_pdf": False,
-                "title": title or "",
-                "action_required": None,
-                "warning": None,
-                "resume_action": "retry_save",
-                "timeout_stage": "save_confirmation",
-            }
-        if doi and risk_class == "normal":
-            return _doi_api_fallback(
-                doi, title, collection_key=collection_key, tags=tags,
-                get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
-            )
-        return {"status": "failed", "method": "connector",
-                "error": "item_not_found_after_save", "item_key": None, "has_pdf": False,
-                "title": title or "", "action_required": None,
-                "warning": "Connector reported success but item not found."}
+            return _manual_completion(None, title_text, "retry_save", "save_confirmation")
+        return _saved_unconfirmed(
+            "The connector reported a save, but the new item could not be identified.",
+            title_text, found if found is not None and not found.get("in_target") else None,
+        )
+
+    if str(validation.get("reason") or "").startswith("validation_error"):
+        # Zotero could not be read back (local API down, Web API not yet
+        # synced). The item exists; deleting or replacing it would lose it.
+        return {"status": "saved_unconfirmed", "method": "connector", "item_key": item_key,
+                "has_pdf": False, "title": title_text, "action_required": None,
+                "warning": (
+                    f"Saved as item {item_key}, but ZotPilot could not read it back "
+                    "to verify it. Check it in Zotero; do not re-ingest this paper."
+                )}
 
     # Step 4: Validate the saved item
-    validation = validate_saved_item(item_key, get_writer=get_writer, _logger=_logger)
-
     if not validation["valid"]:
         reason = validation.get("reason", "")
         # Cold-start retry for webpage saves: background tab JS throttling
@@ -1324,7 +1549,7 @@ def save_single_and_verify(
                     "error_code": "invalid_item",
                     "item_key": item_key,
                     "has_pdf": False,
-                    "title": title or "",
+                    "title": title_text,
                     "action_required": None,
                     "warning": None,
                 }
@@ -1336,13 +1561,7 @@ def save_single_and_verify(
             deleted = delete_item_safe(item_key, get_writer=get_writer, _logger=_logger)
             if not deleted:
                 _logger.warning("Failed to delete invalid webpage item %s — manual cleanup may be needed", item_key)
-            return save_single_and_verify(
-                url, doi, title, arxiv_id=arxiv_id,
-                collection_key=collection_key, tags=tags,
-                bridge_url=bridge_url, get_writer=get_writer,
-                writer_lock=writer_lock, _logger=_logger,
-                _retry_count=1,
-            )
+            return save_single_and_verify(url, doi, title, **retry_kwargs)
         _logger.warning(
             "Connector item %s invalid: %s — deleting and falling back to API",
             item_key, reason,
@@ -1352,18 +1571,21 @@ def save_single_and_verify(
         if not deleted:
             delete_warn = f"Failed to delete invalid item {item_key}. Manual cleanup may be needed."
             _logger.warning(delete_warn)
-        if doi and risk_class == "normal":
+        elif doi and risk_class == "normal":
             return _doi_api_fallback(
                 doi, title, arxiv_id=arxiv_id,
                 collection_key=collection_key, tags=tags,
                 get_writer=get_writer, writer_lock=writer_lock, _logger=_logger,
+                reason=f"browser connector saved an unusable item ({reason})",
             )
-        warning_text = f"Connector created invalid item ({validation['reason']}), deleted."
+        warning_text = f"Connector created invalid item ({validation['reason']})"
+        warning_text += ", deleted." if deleted else "."
         if delete_warn:
             warning_text += " " + delete_warn
         return {"status": "failed", "method": "connector",
-                "error": f"invalid_item:{validation['reason']}", "item_key": None,
-                "has_pdf": False, "title": title or "", "action_required": None,
+                "error": f"invalid_item:{validation['reason']}",
+                "item_key": None if deleted else item_key,
+                "has_pdf": False, "title": title_text, "action_required": None,
                 "warning": warning_text}
 
     # Step 5: Valid item — apply routing and check PDF
@@ -1421,6 +1643,8 @@ def save_single_and_verify(
     pdf_status = check_pdf_status(
         item_key, get_writer=get_writer,
         timeout_s=pdf_poll_timeout,
+        api_prefix=api_prefix,
+        has_pdf_locally=has_pdf_locally,
         _logger=_logger,
     )
 
@@ -1466,17 +1690,7 @@ def save_single_and_verify(
             attach_status = "attach_failed"
 
     if risk_class in {"manual_verification", "access_sensitive"} and pdf_status != "attached":
-        return {
-            "status": "__manual_completion_required__",
-            "method": "connector",
-            "item_key": item_key,
-            "has_pdf": False,
-            "title": real_title,
-            "action_required": None,
-            "warning": None,
-            "resume_action": "reconcile_existing",
-            "timeout_stage": "manual_completion",
-        }
+        return _manual_completion(item_key, real_title, "reconcile_existing", "manual_completion")
 
     status = "saved_with_pdf" if pdf_status == "attached" else "saved_metadata_only"
     if pdf_status == "attached":
@@ -1510,8 +1724,13 @@ def _doi_api_fallback(
     get_writer,
     writer_lock,
     _logger=None,
+    reason: str = "browser connector was unavailable",
 ) -> dict:
     """DOI API fallback：通过 CrossRef/arXiv 元数据 + pyzotero 创建条目。
+
+    Only for saves the connector did not make — callers never use it after a
+    connector timeout. ``reason`` completes "Created from DOI metadata because
+    the …" in the returned warning.
 
     arxiv_id — when provided, save_via_api resolves via the arXiv API instead
     of CrossRef (avoids CrossRef returning arxiv_id=None for journal DOIs) and
@@ -1519,7 +1738,6 @@ def _doi_api_fallback(
     """
     if _logger is None:
         _logger = logger
-
 
     candidate = {
         "paper": {
@@ -1536,11 +1754,16 @@ def _doi_api_fallback(
         logger=_logger,
     )
     if result.get("success"):
-        return {"status": "saved_metadata_only", "method": "api_fallback",
-                "item_key": result.get("item_key"), "has_pdf": bool(result.get("pdf")),
+        has_pdf = bool(result.get("pdf"))
+        warning = f"Created from DOI metadata because the {reason}."
+        if not has_pdf:
+            warning += " No open-access PDF was attached."
+        return {"status": "saved_with_pdf" if has_pdf else "saved_metadata_only",
+                "method": "api_fallback",
+                "item_key": result.get("item_key"), "has_pdf": has_pdf,
                 "title": result.get("title", title or ""),
                 "action_required": None,
-                "warning": "Created via DOI API (Connector failed). PDF may be missing for paywalled papers."}
+                "warning": warning}
     return {"status": "failed", "method": "api_fallback",
             "error": result.get("error", "api_save_failed"), "item_key": None,
             "has_pdf": False, "title": title or "",

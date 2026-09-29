@@ -28,7 +28,11 @@ console.log("[ZotPilot] agentAPI.js loaded at " + Date.now());
 
 Zotero.AgentAPI = new function() {
 	const BRIDGE_URL = "http://127.0.0.1:2619";
-	const ZOTERO_LOCAL_API_URL = "http://127.0.0.1:23119/api/users/0/items/top";
+	const ZOTERO_LOCAL_API_BASE = "http://127.0.0.1:23119/api";
+	// Library whose items a save is looked up in. The connector saves into the
+	// library selected in Zotero; ZotPilot names that library in the command.
+	const DEFAULT_API_PREFIX = "users/0";
+	const API_PREFIX_RE = /^(users\/0|groups\/\d+)$/;
 	const POLL_INTERVAL = 2000;
 	// 180s accommodates publishers whose Zotero translator asks for user
 	// verification (ScienceDirect/Elsevier "Continue" prompt, Cell, etc.).
@@ -310,15 +314,6 @@ Zotero.AgentAPI = new function() {
 			.replace(/[^\p{L}\p{N}\s]/gu, "")
 			.trim();
 	}
-	function _titlesOverlap(expected, saved) {
-		if (!expected || !saved) return true; // skip if unknown
-		let expWords = expected.toLowerCase().split(/\s+/).filter(Boolean);
-		let savWords = saved.toLowerCase().split(/\s+/).filter(Boolean);
-		if (!expWords.length) return true;
-		let overlap = expWords.filter(w => savWords.includes(w)).length;
-		return overlap / expWords.length >= 0.3;
-	}
-
 	function _extractRecentItem(rawItem) {
 		if (!rawItem || typeof rawItem !== "object") return null;
 		let data = rawItem.data && typeof rawItem.data === "object" ? rawItem.data : rawItem;
@@ -366,8 +361,13 @@ Zotero.AgentAPI = new function() {
 		return { error: "local_api_read_only" };
 	}
 
-	async function _fetchRecentTopLevelItems() {
-		let url = ZOTERO_LOCAL_API_URL
+	function _apiPrefixFor(command) {
+		let prefix = command && command.library;
+		return (typeof prefix === "string" && API_PREFIX_RE.test(prefix)) ? prefix : DEFAULT_API_PREFIX;
+	}
+
+	async function _fetchRecentTopLevelItems(apiPrefix) {
+		let url = ZOTERO_LOCAL_API_BASE + "/" + (apiPrefix || DEFAULT_API_PREFIX) + "/items/top"
 			+ "?format=json"
 			+ "&limit=" + RECENT_ITEMS_LIMIT
 			+ "&sort=dateAdded"
@@ -398,11 +398,13 @@ Zotero.AgentAPI = new function() {
 	 * Second handshake: poll Zotero local API until the newly saved item appears,
 	 * confirming it has been written to the database. Returns item_key or null.
 	 *
-	 * Polls every 1s for up to 15s. Resolves as soon as a new item is detected
-	 * that wasn't in the pre-save snapshot. This is event-driven in spirit —
-	 * we stop as soon as we see the signal (new item), not after a fixed delay.
+	 * Polls every 1s for up to 45s. A new item counts only if its title matches
+	 * the saved title (when one is known): another item can appear in the
+	 * library during the save — a sync, another client — and reporting it
+	 * under this save's request attaches the wrong paper. Never guesses among
+	 * several new items; null lets ZotPilot identify the item itself.
 	 */
-	async function _waitForItemInZotero(entry, tabTitle, beforeItems) {
+	async function _waitForItemInZotero(entry, tabTitle, beforeItems, apiPrefix) {
 		// Fast path: extension already captured item_key from itemProgress
 		if (entry.item_key) return entry.item_key;
 
@@ -416,68 +418,24 @@ Zotero.AgentAPI = new function() {
 			if (attempt > 0) {
 				await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 			}
-			let afterItems = await _fetchRecentTopLevelItems();
+			let afterItems = await _fetchRecentTopLevelItems(apiPrefix);
 			let newItems = afterItems.filter((item) => !beforeKeys.has(item.key));
-			if (newItems.length === 1) {
+			if (newItems.length === 1 && !entry.item_title) {
 				Zotero.debug("[ZotPilot] second handshake: found new item after " + attempt + " wait(s): " + newItems[0].key);
 				return newItems[0].key;
 			}
-			if (newItems.length > 1) {
-				// Multiple new items — try title match
+			if (newItems.length) {
 				let matched = _pickBestMatchingItem(newItems, [entry.item_title, tabTitle]);
 				if (matched) {
 					Zotero.debug("[ZotPilot] second handshake: title-matched item after " + attempt + " wait(s): " + matched.key);
 					return matched.key;
 				}
-				// Ambiguous — return first new item as best guess
-				Zotero.debug("[ZotPilot] second handshake: ambiguous (" + newItems.length + " new items), using first");
-				return newItems[0].key;
+				Zotero.debug("[ZotPilot] second handshake: " + newItems.length + " new item(s), none matching the saved title");
 			}
-			Zotero.debug("[ZotPilot] second handshake attempt " + (attempt + 1) + "/" + MAX_ATTEMPTS + ": no new item yet");
+			Zotero.debug("[ZotPilot] second handshake attempt " + (attempt + 1) + "/" + MAX_ATTEMPTS + ": no matching item yet");
 		}
 		Zotero.debug("[ZotPilot] second handshake timed out — item_key unknown");
 		return null;
-	}
-
-	async function _discoverItemKey(entry, tabTitle, beforeItems) {
-		if (entry.item_key) return entry.item_key;
-
-		let afterItems = await _fetchRecentTopLevelItems();
-		if (!afterItems.length) return null;
-
-		let beforeKeys = new Set((beforeItems || []).map((item) => item.key).filter(Boolean));
-		let newItems = afterItems.filter((item) => !beforeKeys.has(item.key));
-
-		if (newItems.length === 1) {
-			return newItems[0].key;
-		}
-
-		let matched = _pickBestMatchingItem(newItems, [entry.item_title, tabTitle]);
-		if (matched) {
-			return matched.key;
-		}
-
-		if (!beforeKeys.size) {
-			matched = _pickBestMatchingItem(afterItems, [entry.item_title, tabTitle]);
-			if (matched) {
-				return matched.key;
-			}
-		}
-
-		if (newItems.length > 1) {
-			// Filter out items whose title doesn't overlap with the expected title
-			let filtered = newItems.filter((item) => _titlesOverlap(entry.item_title, item.title));
-			if (filtered.length === 1) {
-				Zotero.debug("[ZotPilot] item_key discovery: title-filtered to 1 candidate");
-				return filtered[0].key;
-			}
-			if (filtered.length > 1) {
-				Zotero.debug("[ZotPilot] item_key discovery ambiguous after title filter (" + filtered.length + " candidates)");
-			}
-			Zotero.debug("[ZotPilot] item_key discovery: all new items have wrong titles — marking wrong_paper");
-			return null; // all new items look like wrong papers
-		}
-		return null; // no matching item found
 	}
 
 	/**
@@ -496,6 +454,7 @@ Zotero.AgentAPI = new function() {
 	 */
 	async function _handleSave(command) {
 		const { request_id, url } = command;
+		const apiPrefix = _apiPrefixFor(command);
 		_busy = true;
 		Zotero.Connector_Browser.setKeepServiceWorkerAlive(true);
 		let tabId = null;
@@ -503,7 +462,7 @@ Zotero.AgentAPI = new function() {
 		try {
 			// 1. Snapshot recent items BEFORE opening tab — ensures the new item
 			//    appears in the post-save diff even if the translator fires quickly
-			let recentItemsBeforeSave = await _fetchRecentTopLevelItems();
+			let recentItemsBeforeSave = await _fetchRecentTopLevelItems(apiPrefix);
 
 			// 2. Open tab
 			let tab = await browser.tabs.create({ url: url, active: false });
@@ -565,7 +524,7 @@ Zotero.AgentAPI = new function() {
 
 			// 5. Trigger save — Task 1.2: catch synchronous throw → save_trigger_failed.
 			tab = await browser.tabs.get(tab.id);
-			// Capture tab title now (before tab closes) for use in _discoverItemKey
+			// Capture tab title now (before tab closes) for the second handshake
 			let tabTitleAtSave = tab.title || "";
 
 			// Anti-bot check: if the page title matches a known challenge pattern,
@@ -609,7 +568,7 @@ Zotero.AgentAPI = new function() {
 			// where progressWindow.done fires before Zotero finishes writing.
 			// Also run for "unconfirmed" (60s timeout) — item may still have been saved.
 			if (result.success === true || result.success === "unconfirmed") {
-				entry.item_key = await _waitForItemInZotero(entry, tabTitleAtSave, recentItemsBeforeSave);
+				entry.item_key = await _waitForItemInZotero(entry, tabTitleAtSave, recentItemsBeforeSave, apiPrefix);
 				Zotero.debug("[ZotPilot] second handshake item_key: " + entry.item_key);
 				// If we found the item despite unconfirmed signal, upgrade to success
 				if (result.success === "unconfirmed" && entry.item_key) {
@@ -829,13 +788,22 @@ Zotero.AgentAPI = new function() {
 			let stabilityTimer = null;
 			let redirectDetected = false;
 			let translatorTimer = null;
+			let waitingForTranslator = false;
 			// Track whether a translator was found; defaults to true for non-save contexts
-			// (hard timeout and redirect paths) — only false when translator wait expires.
+			// (hard timeout before the page settles, redirect paths) — false when the
+			// translator wait expires, including by the hard timeout.
 			let translatorFound = true;
 
 			const hardTimer = setTimeout(() => {
 				if (!resolved) {
 					Zotero.debug("[ZotPilot] _waitForReady hard timeout for tab " + tabId);
+					// Timed out while waiting for a translator: report what the tab
+					// actually has, so a save is never triggered on a page Zotero
+					// cannot translate (it would save a bare webpage item).
+					if (waitingForTranslator) {
+						let tabInfo = Zotero.Connector_Browser.getTabInfo(tabId);
+						translatorFound = !!(tabInfo && tabInfo.translators && tabInfo.translators.length);
+					}
 					_cleanup();
 					resolve({ translatorFound });
 				}
@@ -876,6 +844,7 @@ Zotero.AgentAPI = new function() {
 
 				// Event-driven: wait for onTranslators hook to fire
 				Zotero.debug("[ZotPilot] waiting for onTranslators event for tab " + tabId);
+				waitingForTranslator = true;
 				_translatorWaiters.set(tabId, () => _resolveNow(true));
 
 				// Timeout if translator never arrives (e.g. publisher has no Zotero translator)
