@@ -2,9 +2,15 @@
 
 from unittest.mock import patch
 
+import chromadb
 import pytest
+from chromadb.config import Settings
 
-from zotpilot.vector_store import ChromaStoreUnopenableError, VectorStore
+from zotpilot.vector_store import (
+    ChromaStoreUnopenableError,
+    VectorStore,
+    _probe_chroma_db_access,
+)
 
 
 @pytest.fixture
@@ -85,3 +91,26 @@ class TestVectorStore:
 
         assert (db_path / "chroma.sqlite3").read_text() == "broken"
         assert list(tmp_path.glob("chroma.corrupt-*")) == []
+
+
+def _collection_names(db_path) -> set[str]:
+    client = chromadb.PersistentClient(path=str(db_path), settings=Settings(anonymized_telemetry=False))
+    return {c.name for c in client.list_collections()}
+
+
+class TestProbeConfiguredCollection:
+    def test_probe_does_not_create_default_collection(self, tmp_path, mock_embedder):
+        VectorStore(tmp_path / "chroma", mock_embedder, collection_name="other")
+
+        assert _probe_chroma_db_access(tmp_path / "chroma", "other") is True
+
+        names = _collection_names(tmp_path / "chroma")
+        assert names == {"other"}
+
+    def test_probe_accepts_store_without_the_collection_yet(self, tmp_path, mock_embedder):
+        VectorStore(tmp_path / "chroma", mock_embedder, collection_name="other")
+
+        assert _probe_chroma_db_access(tmp_path / "chroma", "not_yet_created") is True
+
+        names = _collection_names(tmp_path / "chroma")
+        assert names == {"other"}

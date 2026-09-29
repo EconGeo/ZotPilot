@@ -18,11 +18,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _probe_chroma_db_access(db_path: Path) -> bool:
+def _probe_chroma_db_access(db_path: Path, collection_name: str = "chunks") -> bool:
     """Probe whether an existing Chroma index can be opened safely.
 
     Run the probe in a subprocess so Rust-side segfaults do not take down the
-    caller. Returns False on any crash or non-zero exit.
+    caller. Returns False on any crash or non-zero exit. Read-only: it never
+    creates the collection, and a collection that does not exist yet is fine.
     """
     if not db_path.exists():
         return True
@@ -34,11 +35,15 @@ def _probe_chroma_db_access(db_path: Path) -> bool:
             sys.executable,
             "-c",
             (
-                "import chromadb; "
-                "from chromadb.config import Settings; "
-                f"c=chromadb.PersistentClient(path={str(db_path)!r}, settings=Settings(anonymized_telemetry=False)); "
-                "col=c.get_or_create_collection(name='chunks', metadata={'hnsw:space':'cosine'}); "
-                "col.peek(limit=1)"
+                "import chromadb\n"
+                "from chromadb.config import Settings\n"
+                "from chromadb.errors import NotFoundError\n"
+                f"c=chromadb.PersistentClient(path={str(db_path)!r}, settings=Settings(anonymized_telemetry=False))\n"
+                "try:\n"
+                f"    col=c.get_collection(name={collection_name!r})\n"
+                "    col.peek(limit=1)\n"
+                "except (ValueError, NotFoundError):\n"
+                "    pass\n"
             ),
         ],
         capture_output=True,
@@ -79,7 +84,7 @@ class VectorStore:
     def __init__(self, db_path: Path, embedder: EmbedderProtocol, collection_name: str = "chunks"):
         self.db_path = Path(db_path)
         self.collection_name = collection_name
-        if not _probe_chroma_db_access(self.db_path):
+        if not _probe_chroma_db_access(self.db_path, self.collection_name):
             raise ChromaStoreUnopenableError(
                 f"Chroma index at {self.db_path} could not be opened safely. "
                 "Nothing was moved or deleted. Inspect or restore the directory, or delete it "
