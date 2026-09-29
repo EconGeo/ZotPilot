@@ -179,6 +179,7 @@ class TestConfigCommand:
             json.dumps(
                 {
                     "zotero_data_dir": str(tmp_path),
+                    "chroma_db_path": str(tmp_path / "chroma"),
                     "embedding_provider": "none",
                 }
             )
@@ -192,3 +193,34 @@ class TestConfigCommand:
         assert "version" in data
         assert "secret_backend" in data
         assert "write_ops_ready" in data
+
+    def test_status_opens_the_configured_collection(self, tmp_path, monkeypatch, capsys):
+        """status must count the configured collection, not create an empty default one."""
+        from unittest.mock import MagicMock, patch
+
+        import sqlite3
+
+        _use_local_secrets(monkeypatch, tmp_path)
+        sqlite3.connect(tmp_path / "zotero.sqlite").close()  # human-readable status exits early without it
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "zotero_data_dir": str(tmp_path),
+                    "chroma_db_path": str(tmp_path / "chroma"),
+                    "embedding_provider": "none",
+                    "collection_name": "chunks_bge",
+                }
+            )
+        )
+
+        from zotpilot.cli import cmd_status
+
+        for as_json in (True, False):
+            with (
+                patch("zotpilot.vector_store.VectorStore") as store_cls,
+                patch("zotpilot.embeddings.create_embedder", return_value=MagicMock()),
+            ):
+                cmd_status(SimpleNamespace(json=as_json, config=str(cfg_path)))
+            capsys.readouterr()
+            assert store_cls.call_args.kwargs.get("collection_name") == "chunks_bge"

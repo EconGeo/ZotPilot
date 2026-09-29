@@ -19,6 +19,16 @@
   timed out, a CLI run started beside it, and the two writers corrupted `chunks_bge`'s HNSW
   segment (2026-09-28).
 
+- **`zotpilot status` reads the configured collection / `status` 读取配置的集合** ——
+  `cmd_status` 此前忽略 `collection_name`，统计的是默认 `chunks` 集合（不存在时还会新建一个空集合）。
+  测试套件新增守卫：任何测试若在用户真实数据目录中打开 `VectorStore` 即失败。
+
+  `cmd_status` ignored `collection_name`, so it counted (or created an empty) default
+  `chunks` collection. A status test without `chroma_db_path` opened the developer's real
+  store during a test run; `VectorStore`'s startup probe failed on the damaged index and moved
+  the whole store aside. The test now uses `tmp_path`, and `tests/conftest.py` fails any test
+  that opens a `VectorStore` inside the real data directory.
+
 ### Changed
 
 - **API keys move to `~/.secrets.env` / API key 统一存放在 `~/.secrets.env`** —— 密钥不再写入
