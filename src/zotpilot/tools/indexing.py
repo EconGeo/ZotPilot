@@ -12,10 +12,9 @@ from ..index_authority import (
     IndexJournal,
     LeaseContentionError,
     authoritative_indexed_doc_ids,
-    current_library_pdf_doc_ids,
 )
 from ..reranker import VALID_QUARTILES, VALID_SECTIONS
-from ..state import ToolError, _get_config, _get_reranker, _get_retriever, _get_store, _get_zotero, _index_lock, mcp
+from ..state import ToolError, _get_config, _get_reranker, _get_retriever, _get_store, _index_lock, mcp
 from .profiles import tool_tags
 
 logger = logging.getLogger(__name__)
@@ -33,14 +32,16 @@ def _parse_json_string_list(value: Any) -> Any:
     return value
 
 
-def _collect_unindexed_papers(limit: int | None = None, offset: int = 0) -> tuple[list[dict], int]:
+def _collect_unindexed_papers(
+    limit: int | None = None, offset: int = 0, indexed_set: set[str] | None = None
+) -> tuple[list[dict], int]:
     """Return unindexed Zotero papers across all libraries and their total count."""
     from ..indexer import enumerate_indexable_libraries, global_pdf_doc_ids
     from ..zotero_client import ZoteroClient
 
     config = _get_config()
-    union = global_pdf_doc_ids(config)
-    indexed_set = authoritative_indexed_doc_ids(_get_store(), union)
+    if indexed_set is None:
+        indexed_set = authoritative_indexed_doc_ids(_get_store(), global_pdf_doc_ids(config))
 
     papers: list[dict] = []
     total = 0
@@ -360,10 +361,11 @@ def get_index_stats(
         return result
     _get_retriever()  # Ensure initialized
     store = _get_store()
-    zotero = _get_zotero()
-    current_doc_ids = current_library_pdf_doc_ids(zotero)
-    _config = _get_config()
-    doc_ids = authoritative_indexed_doc_ids(store, current_doc_ids)
+    # Indexing covers every library, so the totals must too; the unindexed list
+    # below already does, and the two disagreed when only the user library counted.
+    from ..indexer import global_pdf_doc_ids
+
+    doc_ids = authoritative_indexed_doc_ids(store, global_pdf_doc_ids(_config))
     total_chunks = store.count_chunks_for_doc_ids(doc_ids)
 
     # Get section, journal, and chunk type coverage from a sample of chunks
@@ -399,7 +401,9 @@ def get_index_stats(
     unindexed_papers: list[dict] = []
     unindexed_count = 0
     try:
-        unindexed_papers, unindexed_count = _collect_unindexed_papers(limit=limit, offset=offset)
+        unindexed_papers, unindexed_count = _collect_unindexed_papers(
+            limit=limit, offset=offset, indexed_set=doc_ids
+        )
     except Exception as e:
         logger.warning(f"Could not check for unindexed papers: {e}")
 
