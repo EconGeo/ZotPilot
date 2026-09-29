@@ -1,10 +1,8 @@
 """ChromaDB vector storage with chunk management."""
 import logging
 import re
-import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,16 +47,6 @@ def _probe_chroma_db_access(db_path: Path) -> bool:
     return probe.returncode == 0
 
 
-def _quarantine_chroma_db(db_path: Path) -> Path | None:
-    """Move a broken Chroma directory aside and return the backup path."""
-    if not db_path.exists():
-        return None
-    suffix = time.strftime("%Y%m%d-%H%M%S")
-    backup = db_path.with_name(f"{db_path.name}.corrupt-{suffix}")
-    shutil.move(str(db_path), str(backup))
-    return backup
-
-
 def _ref_chunk_index(ref_map: dict, element_type: str, item) -> int:
     """Look up chunk_index from ref_map using caption number."""
     caption = getattr(item, 'caption', None)
@@ -67,6 +55,10 @@ def _ref_chunk_index(ref_map: dict, element_type: str, item) -> int:
         if m:
             return ref_map.get((element_type, int(m.group(1))), -1)
     return -1
+
+
+class ChromaStoreUnopenableError(RuntimeError):
+    """Raised when an existing Chroma index fails the open probe. The store is left untouched."""
 
 
 class EmbeddingDimensionMismatchError(Exception):
@@ -88,11 +80,10 @@ class VectorStore:
         self.db_path = Path(db_path)
         self.collection_name = collection_name
         if not _probe_chroma_db_access(self.db_path):
-            backup = _quarantine_chroma_db(self.db_path)
-            logger.warning(
-                "Chroma index at %s could not be opened safely; moved aside to %s and rebuilding a fresh index.",
-                self.db_path,
-                backup,
+            raise ChromaStoreUnopenableError(
+                f"Chroma index at {self.db_path} could not be opened safely. "
+                "Nothing was moved or deleted. Inspect or restore the directory, or delete it "
+                "and re-run `zotpilot index` to rebuild."
             )
         self.db_path.mkdir(parents=True, exist_ok=True)
 

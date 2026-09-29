@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from zotpilot.vector_store import VectorStore
+from zotpilot.vector_store import ChromaStoreUnopenableError, VectorStore
 
 
 @pytest.fixture
@@ -72,16 +72,16 @@ class TestVectorStore:
         results = store.search("anything", top_k=5)
         assert results == []
 
-    def test_corrupt_db_is_quarantined_when_probe_fails(self, tmp_path, mock_embedder):
+    def test_unopenable_db_fails_loudly_and_is_untouched(self, tmp_path, mock_embedder):
         db_path = tmp_path / "chroma"
         db_path.mkdir()
         (db_path / "chroma.sqlite3").write_text("broken")
 
         with (
             patch("zotpilot.vector_store._probe_chroma_db_access", return_value=False),
+            pytest.raises(ChromaStoreUnopenableError),
         ):
-            store = VectorStore(db_path, mock_embedder)
+            VectorStore(db_path, mock_embedder)
 
-        backups = list(tmp_path.glob("chroma.corrupt-*"))
-        assert len(backups) == 1
-        assert store.db_path.exists()
+        assert (db_path / "chroma.sqlite3").read_text() == "broken"
+        assert list(tmp_path.glob("chroma.corrupt-*")) == []
