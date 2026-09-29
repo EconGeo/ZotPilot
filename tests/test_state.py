@@ -343,3 +343,25 @@ class TestMCPInstructions:
 
         assert "add_paper_by_identifier" not in referenced
         assert (referenced - non_tool_tokens) <= registered
+
+
+def test_search_refuses_a_relative_chroma_db_path(monkeypatch):
+    """Search opens the store too, so it must reject a relative path like indexing does."""
+    import pytest
+
+    import zotpilot.state as state_mod
+    from zotpilot.state import ToolError
+
+    config = SimpleNamespace(
+        embedding_provider="ollama", chroma_db_path=Path("relative/chroma"),
+        collection_name="c", rerank_alpha=0.7,
+    )
+    monkeypatch.setattr(state_mod, "_retriever", None)
+    monkeypatch.setattr(state_mod, "_config", None)  # restored after the test
+    monkeypatch.setattr(state_mod, "resolve_runtime_config", lambda: config)
+    with patch("zotpilot.embeddings.create_embedder") as create_embedder, \
+         patch("zotpilot.vector_store.VectorStore") as vector_store:
+        with pytest.raises(ToolError, match="absolute"):
+            state_mod._get_retriever()
+    create_embedder.assert_not_called()
+    vector_store.assert_not_called()

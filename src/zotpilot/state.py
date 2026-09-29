@@ -234,6 +234,11 @@ def _get_retriever():
                         "Configure an embedding provider (gemini/dashscope/local) "
                         "and run index_library() first."
                     )
+                from .config import chroma_db_path_error
+
+                path_error = chroma_db_path_error(_config.chroma_db_path)
+                if path_error:
+                    raise ToolError(path_error)
                 from .embeddings import create_embedder
                 from .reranker import Reranker
                 from .retriever import Retriever
