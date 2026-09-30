@@ -90,6 +90,7 @@ class PlatformRuntimeState:
     skill_dirs: tuple[str, ...] = ()
     skill_hash_ok: bool = False
     registration_hash_ok: bool = False
+    managed_skill_dirs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ class DesiredRuntime:
     env: dict[str, str]
     targets: tuple[str, ...]
     source_dir: Path | None = None
+    deploy_skills: bool = True
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,7 @@ class ChangeSet:
     register_platforms: tuple[str, ...]
     drift_state: str
     reasons: dict[str, list[str]]
+    undeploy_skill_platforms: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,7 @@ class ApplyResult:
     deployed: tuple[str, ...]
     registered: tuple[str, ...]
     restart_required: bool
+    undeployed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -478,6 +482,7 @@ def inspect_current_state(
             skill_dirs=skill_dirs,
             skill_hash_ok=skill_hash_ok,
             registration_hash_ok=registration_hash_ok,
+            managed_skill_dirs=_managed_skill_dirs(plat),
         )
     return RuntimeState(
         package_version=__version__,
@@ -488,15 +493,20 @@ def inspect_current_state(
 
 def plan_runtime_changes(desired: DesiredRuntime, current: RuntimeState) -> ChangeSet:
     deploy: list[str] = []
+    undeploy: list[str] = []
     register: list[str] = []
     reasons: dict[str, list[str]] = {}
 
     for plat in desired.targets:
         state = current.platforms[plat]
         platform_reasons: list[str] = []
-        if not state.skill_hash_ok:
-            deploy.append(plat)
-            platform_reasons.append("skills-out-of-sync")
+        if desired.deploy_skills:
+            if not state.skill_hash_ok:
+                deploy.append(plat)
+                platform_reasons.append("skills-out-of-sync")
+        elif state.managed_skill_dirs:
+            undeploy.append(plat)
+            platform_reasons.append("skills-deployed-while-disabled")
         if not state.registered:
             register.append(plat)
             platform_reasons.append("not-registered")
@@ -521,6 +531,7 @@ def plan_runtime_changes(desired: DesiredRuntime, current: RuntimeState) -> Chan
         register_platforms=tuple(dict.fromkeys(register)),
         drift_state=drift_state,
         reasons=reasons,
+        undeploy_skill_platforms=tuple(dict.fromkeys(undeploy)),
     )
 
 
@@ -535,6 +546,11 @@ def apply_runtime_changes(
         deploy_results = deploy_skills(platforms=list(changes.deploy_skill_platforms))
         deployed = [plat for plat, ok in deploy_results.items() if ok]
 
+    undeployed: list[str] = []
+    if changes.undeploy_skill_platforms:
+        undeploy_results = undeploy_skills(list(changes.undeploy_skill_platforms))
+        undeployed = [plat for plat, ok in undeploy_results.items() if ok]
+
     for plat in changes.register_platforms:
         fn = _REGISTER_FNS.get(plat)
         if fn is None:
@@ -545,7 +561,8 @@ def apply_runtime_changes(
     return ApplyResult(
         deployed=tuple(deployed),
         registered=tuple(registered),
-        restart_required=bool(deployed or registered),
+        restart_required=bool(deployed or registered or undeployed),
+        undeployed=tuple(undeployed),
     )
 
 
@@ -567,6 +584,7 @@ def reconcile_runtime(
         env={},
         targets=current.supported_targets,
         source_dir=dev_source_dir,
+        deploy_skills=_skill_deploy_enabled(),
     )
     changes = plan_runtime_changes(desired, current)
     applied = apply_runtime_changes(desired, changes) if apply else None
@@ -861,6 +879,52 @@ def deploy_skills(platforms: list[str] | None = None) -> dict[str, bool]:
     return results
 
 
+def _skill_deploy_enabled(config_path: Path | None = None) -> bool:
+    """The ``deploy_skills`` setting, read straight from config.json.
+
+    Not via Config.load: that raises on unrelated invalid keys, and falling back to
+    "deploy" there would silently re-create the user-level copies this switch removes.
+    """
+    from .config import _as_bool, _default_config_dir
+    path = config_path or (_default_config_dir() / "config.json")
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return _as_bool(data.get("deploy_skills") if isinstance(data, dict) else None, True)
+
+
+def _managed_skill_dirs(plat: str) -> tuple[str, ...]:
+    """Skill dirs for ``plat`` that ZotPilot itself deployed: a real directory carrying its
+    version marker. A symlink or an unmarked directory belongs to something else."""
+    skills_dir = PLATFORMS.get(plat, {}).get("skills_dir")
+    if not skills_dir:
+        return ()
+    base = Path(skills_dir).expanduser()
+    found = []
+    for source in _skill_source_files():
+        target = base / _skill_name_for_file(source)
+        if target.is_dir() and not target.is_symlink() and _version_marker_path(target).is_file():
+            found.append(str(target))
+    return tuple(found)
+
+
+def undeploy_skills(platforms: list[str]) -> dict[str, bool]:
+    """Remove the skill dirs ZotPilot deployed (``deploy_skills`` is false)."""
+    results: dict[str, bool] = {}
+    for plat in platforms:
+        ok = True
+        for path in _managed_skill_dirs(plat):
+            try:
+                shutil.rmtree(path)
+                print(f"  {PLATFORMS[plat]['label']}: removed {path} (deploy_skills is false)")
+            except OSError as exc:
+                print(f"  ERROR: could not remove {path}: {exc}", file=sys.stderr)
+                ok = False
+        results[plat] = ok
+    return results
+
+
 # ---------------------------------------------------------------------------
 # CLI-based registration (Tier 1)
 # ---------------------------------------------------------------------------
@@ -1042,6 +1106,9 @@ def register(
         ) and (
             plat not in result.changes.register_platforms
             or plat in result.applied.registered
+        ) and (
+            plat not in result.changes.undeploy_skill_platforms
+            or plat in result.applied.undeployed
         )
         for plat in supported_targets
     }
