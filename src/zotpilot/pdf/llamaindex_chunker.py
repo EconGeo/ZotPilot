@@ -36,7 +36,7 @@ class LlamaIndexChunker:
         ids = self._tokenizer.encode(text).ids
         if len(ids) <= self.hard_cap_tokens:
             return text
-        return self._tokenizer.decode(ids[: self.hard_cap_tokens])
+        return str(self._tokenizer.decode(ids[: self.hard_cap_tokens]))
 
     def chunk(
         self,
