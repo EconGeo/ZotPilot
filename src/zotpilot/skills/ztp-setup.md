@@ -53,6 +53,12 @@ description: >
 6. Configure: `zotpilot setup --non-interactive --provider [gemini|dashscope|local]`
 7. MCP registration and skill deployment are included in `zotpilot setup`. Advanced repair only: `zotpilot install` (alias: `zotpilot register`).
 
+   **Skill deployment can be turned off.** When a project pipeline ships these skills itself,
+   a user-level copy (`~/.claude/skills/ztp-*`) outranks the project's copy of the same name,
+   so run `zotpilot config set deploy_skills false` and then `zotpilot register`: it stops
+   deploying and removes the copies it deployed before. Never re-enable it to "fix" a missing
+   skill in that setup — re-link the project instead.
+
    **Registration is client-level, not per-project.** ZotPilot registers itself once per
    client — `claude mcp add --scope user` for Claude Code, `codex mcp add` for Codex,
    `~/.config/opencode/opencode.json` for OpenCode — so one install serves every project

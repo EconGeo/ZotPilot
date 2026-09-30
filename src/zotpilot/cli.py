@@ -669,6 +669,7 @@ _SCALAR_TYPES = {
     "oversample_multiplier": int, "oversample_topic_factor": int,
     "stats_sample_limit": int, "max_pages": int, "vision_enabled": bool,
     "embedding_dimensions": int, "preflight_enabled": bool,
+    "oa_pdf_upload": bool, "deploy_skills": bool,
 }
 
 
