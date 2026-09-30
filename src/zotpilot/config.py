@@ -96,16 +96,22 @@ def _as_bool(value, default: bool) -> bool:
     """A config boolean, accepting a hand-edited "true"/"false" string as well as JSON bools.
 
     bool("false") is True, which is how `oa_pdf_upload: "false"` once enabled uploads.
+    An unrecognised string ("bogus", "disabled") returns ``default`` with a warning
+    rather than being truthy.
     """
+    if value is None:
+        return default
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in ("true", "1", "yes"):
+        if lowered in ("true", "1", "yes", "y", "on"):
             return True
-        if lowered in ("false", "0", "no"):
+        if lowered in ("false", "0", "no", "n", "off"):
             return False
-    if value is None:
+        logger.warning(
+            "Unrecognised boolean config value %r; using default %s", value, default
+        )
         return default
     return bool(value)
 
@@ -247,20 +253,20 @@ class Config:
             rerank_alpha=data.get("rerank_alpha", 0.7),
             rerank_section_weights=data.get("rerank_section_weights"),
             rerank_journal_weights=data.get("rerank_journal_weights"),
-            rerank_enabled=data.get("rerank_enabled", True),
+            rerank_enabled=_as_bool(data.get("rerank_enabled"), True),
             oversample_multiplier=data.get("oversample_multiplier", 3),
             oversample_topic_factor=data.get("oversample_topic_factor", 5),
             stats_sample_limit=data.get("stats_sample_limit", 10000),
             ocr_language=data.get("ocr_language", "eng"),
             openalex_email=data.get("openalex_email"),
-            vision_enabled=data.get("vision_enabled", True),
+            vision_enabled=_as_bool(data.get("vision_enabled"), True),
             vision_provider=vision_provider,
             vision_model=vision_model,
             anthropic_api_key=data.get("anthropic_api_key"),
             vision_max_tables_per_run=data.get("vision_max_tables_per_run"),
             vision_max_cost_usd=data.get("vision_max_cost_usd"),
             max_pages=data.get("max_pages", 40),
-            preflight_enabled=data.get("preflight_enabled", True),
+            preflight_enabled=_as_bool(data.get("preflight_enabled"), True),
             zotero_api_key=data.get("zotero_api_key"),
             zotero_user_id=data.get("zotero_user_id"),
             zotero_library_type=data.get("zotero_library_type", "user"),

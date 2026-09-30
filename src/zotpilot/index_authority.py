@@ -284,11 +284,12 @@ def acquire_lease(lease: IndexLease) -> str | None:
     if lease.held:
         raise _contention_error(lease)
 
-    if lease.path is None:
+    lock_path = lease.lock_path
+    if lock_path is None:
         if lease.holder_pid is not None and _is_pid_alive(lease.holder_pid):
             raise _contention_error(lease)
     else:
-        fd = os.open(lease.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         if not _try_lock(fd):
             os.close(fd)
             lease._load()  # report the current holder
