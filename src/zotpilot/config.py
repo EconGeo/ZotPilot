@@ -92,6 +92,24 @@ def _old_config_path() -> Path:
     return base / "deep-zotero" / "config.json"
 
 
+def _as_bool(value, default: bool) -> bool:
+    """A config boolean, accepting a hand-edited "true"/"false" string as well as JSON bools.
+
+    bool("false") is True, which is how `oa_pdf_upload: "false"` once enabled uploads.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 @dataclass
 class Config:
     """Application configuration."""
@@ -149,6 +167,11 @@ class Config:
     # (and fails once it is full); Zotero Desktop's "Find Available PDF"
     # stores the file locally instead.
     oa_pdf_upload: bool = False
+    # Copy the packaged ztp-* skills into each client's user-level skills dir
+    # (~/.claude/skills, ...) on register/setup/upgrade. Set false when a project
+    # pipeline vendors the skills itself: a user-level copy outranks a project copy
+    # of the same name in Claude Code, so it would silently replace the vendored one.
+    deploy_skills: bool = True
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "Config":
@@ -244,7 +267,8 @@ class Config:
             semantic_scholar_api_key=data.get("semantic_scholar_api_key"),
             collection_name=data.get("collection_name", "chunks"),
             chunker_backend=chunker_backend,
-            oa_pdf_upload=bool(data.get("oa_pdf_upload", False)),
+            oa_pdf_upload=_as_bool(data.get("oa_pdf_upload"), False),
+            deploy_skills=_as_bool(data.get("deploy_skills"), True),
         )
 
     def save(self, path: Path | str | None = None) -> None:
@@ -296,6 +320,7 @@ class Config:
             "collection_name": self.collection_name,
             "chunker_backend": self.chunker_backend,
             "oa_pdf_upload": self.oa_pdf_upload,
+            "deploy_skills": self.deploy_skills,
         }
         data = {
             key: value for key, value in data.items()
