@@ -1,12 +1,7 @@
 ---
 name: ztp-research
 description: >
-  Use for finding and ingesting new academic papers into Zotero.
-  Trigger on: "调研X领域", "找论文", "论文入库", "帮我收集X相关的文献",
-  "survey papers on X", "find recent papers about X", "ingest these DOIs",
-  "add papers to my library", "collect papers on X".
-  Covers the full pipeline: external search → candidate selection → PDF ingest → tagging → classification → indexing.
-  For synthesizing papers already in the library, use ztp-review instead.
+  Find and ingest new academic papers into Zotero: external search, candidate selection, PDF ingest, tagging, classification, indexing. Use for "survey papers on X", "find recent papers about X", "ingest these DOIs", "add papers to my library". To synthesise papers already in the library use ztp-review.
 ---
 # Research Workflow
 

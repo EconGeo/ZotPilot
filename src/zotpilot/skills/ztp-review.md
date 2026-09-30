@@ -1,12 +1,7 @@
 ---
 name: ztp-review
 description: >
-  Use for reviewing and synthesizing papers already in the local Zotero library.
-  Trigger on: "总结我库里关于X的论文", "我的文献库里有什么X相关的内容", "帮我综述", "文献综述",
-  "what do my papers say about X", "summarize my readings on X", "literature review",
-  "find passages about X in my library", "what have I collected on X".
-  Stays local-first; does not search external databases or ingest new papers.
-  For finding and ingesting new papers, use ztp-research instead.
+  Review and synthesise papers already in the local Zotero library, local-first (no external search, no ingest). Use for "what do my papers say about X", "summarize my readings on X", "literature review", "find passages about X in my library". To find and ingest new papers use ztp-research.
 ---
 # Review Workflow
 
