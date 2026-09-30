@@ -1,12 +1,7 @@
 ---
 name: seed-papers
 description: >
-  Seed a project's bibliography from the local Zotero library before the literature review.
-  Trigger on: "seed papers", "search my library first", "seed the bibliography",
-  "check what I already have on X", "pre-search my library",
-  or at the start of the literature review when ZotPilot is available.
-  Outputs: bibliography_base.bib (BibTeX entries) + zotero_seed.md (annotation summaries).
-  Run BEFORE the literature review so it knows what is already covered.
+  Seed a project bibliography from the local Zotero library before the literature review, writing bibliography_base.bib and zotero_seed.md. Use for "seed papers", "search my library first", "check what I already have on X", or at the start of a literature review.
 allowed-tools: Read,Write,Edit,Grep,Glob
 ---
 

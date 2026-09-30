@@ -1,13 +1,7 @@
 ---
 name: ztp-profile
 description: >
-  Use for analyzing, cleaning up, and reorganizing the Zotero library structure.
-  Trigger on: "整理我的文献库", "清理标签", "合并重复标签", "我的库很乱", "帮我整理收藏夹",
-  "organize my library", "clean up tags", "my library is a mess", "merge duplicate tags",
-  "reorganize collections", "what topics are in my library", "profile my library".
-  Produces a structured curation plan (tag cleanup, collection refactor, orphan assignment)
-  and executes only after explicit user approval.
-  For reading and synthesizing paper content already in the library, use ztp-review instead.
+  Analyse, clean up and reorganise the Zotero library structure: tag cleanup, duplicate-tag merges, collection refactors, orphan assignment. Use for "organize my library", "clean up tags", "my library is a mess", "profile my library". Produces a curation plan and executes only after explicit approval. To synthesise paper content use ztp-review.
 ---
 # Profile Workflow
 
