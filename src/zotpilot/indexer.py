@@ -531,6 +531,13 @@ class Indexer:
         # Batch slicing: record total before cutting
         total_to_index = len(to_index)
 
+        # Probe the embedder before deleting anything: a forced or changed-PDF
+        # re-index drops the old vectors below, and with the backend down (Ollama
+        # not running) nothing would replace them.
+        if to_index:
+            from .embeddings.preflight import check_embedder
+            check_embedder(self.embedder)
+
         keys_requiring_delete = {
             item.item_key
             for item in to_index
@@ -571,10 +578,6 @@ class Indexer:
             "ocr_pages": 0,
             "empty_pages": 0,
         }
-
-        if to_index:
-            from .embeddings.preflight import check_embedder
-            check_embedder(self.embedder)
 
         # ---- Phase 1: Extract all documents (vision specs collected but deferred) ----
         figures_dir = self.config.chroma_db_path.parent / "figures"

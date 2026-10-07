@@ -147,6 +147,19 @@ def _check_embedding_api_key(config) -> CheckResult:
     return CheckResult("embedding_api_key", "fail", f"Unknown provider: {provider}")
 
 
+def _check_embedding_backend(config) -> CheckResult:
+    """Check that a local embedding server (Ollama) is up and has the model."""
+    if config.embedding_provider != "ollama":
+        return CheckResult("embedding_backend", "pass", f"provider={config.embedding_provider} (no local server)")
+    from .embeddings.ollama import ollama_status
+
+    base_url = getattr(config, "ollama_base_url", "http://localhost:11434")
+    problem = ollama_status(base_url, config.embedding_model)
+    if problem:
+        return CheckResult("embedding_backend", "fail", problem)
+    return CheckResult("embedding_backend", "pass", f"Ollama is serving {config.embedding_model} at {base_url}")
+
+
 def _check_secret_backend(config=None, sources: dict[str, str] | None = None) -> CheckResult:
     backend = describe_backend()
     uses_legacy_backend = any(
@@ -303,6 +316,7 @@ def run_checks(config_path: str | None = None, full: bool = False) -> list[Check
 
     # 5. Embedding API key
     results.append(_check_embedding_api_key(config))
+    results.append(_check_embedding_backend(config))
 
     # 6. ChromaDB path + index. Opening a store creates it, so only open one
     # that exists at a valid path: a health check must not make a new index.

@@ -10,6 +10,30 @@ logger = logging.getLogger(__name__)
 OLLAMA_DEFAULT_URL = "http://localhost:11434"
 
 
+def ollama_status(base_url: str, model: str, timeout: float = 3.0) -> str | None:
+    """Return why Ollama cannot serve ``model``, or None when it can.
+
+    One quick GET of /api/tags: says whether the server is up and whether the
+    model is pulled, so callers can stop before any indexing work starts.
+    """
+    base_url = base_url.rstrip("/")
+    try:
+        resp = httpx.get(f"{base_url}/api/tags", timeout=timeout)
+        resp.raise_for_status()
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return (
+            f"Ollama is not running at {base_url}. Start it (`open -a Ollama` on macOS, "
+            f"or `ollama serve`), wait for `curl -s {base_url}/api/tags` to answer, then retry."
+        )
+    except httpx.HTTPError as exc:
+        return f"Ollama at {base_url} answered /api/tags with an error: {exc}"
+    names = {m.get("name", "") for m in resp.json().get("models", [])}
+    wanted = model if ":" in model else f"{model}:latest"
+    if model not in names and wanted not in names:
+        return f"Ollama is running but model '{model}' is not pulled. Run `ollama pull {model}`, then retry."
+    return None
+
+
 class OllamaEmbedder:
     """
     Local embeddings via Ollama (http://localhost:11434).
@@ -33,6 +57,10 @@ class OllamaEmbedder:
         self.dimensions = dimensions
         self.max_input_tokens = 512
         self.embed_batch_size = 16
+
+    def check_ready(self) -> str | None:
+        """Return why this embedder cannot run, or None when it can."""
+        return ollama_status(self.base_url, self.model)
 
     def embed(self, texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
         if not texts:

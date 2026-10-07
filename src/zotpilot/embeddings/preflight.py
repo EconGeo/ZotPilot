@@ -13,6 +13,13 @@ def check_embedder(embedder) -> None:
     """
     if embedder is None:
         return
+    # Local servers (Ollama) can say exactly what is wrong — not running, model
+    # not pulled — which beats a bare "connection refused" from the probe below.
+    check_ready = getattr(embedder, "check_ready", None)
+    if callable(check_ready):
+        problem = check_ready()
+        if isinstance(problem, str) and problem:
+            raise EmbeddingError(f"Embedding preflight failed: {problem}")
     try:
         vec = embedder.embed(["ping"])
     except Exception as exc:

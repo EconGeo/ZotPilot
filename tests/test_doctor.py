@@ -19,6 +19,7 @@ from zotpilot.doctor import (
     _check_config_permissions,
     _check_config_secrets,
     _check_embedding_api_key,
+    _check_embedding_backend,
     _check_python_version,
     _check_secret_backend,
     _check_secrets_file,
@@ -77,6 +78,33 @@ class TestCheckEmbeddingApiKey:
         config.embedding_provider = "gemini"
         config.gemini_api_key = None
         assert _check_embedding_api_key(config).status == "fail"
+
+
+class TestCheckEmbeddingBackend:
+    def test_skipped_for_a_hosted_provider(self):
+        config = MagicMock()
+        config.embedding_provider = "gemini"
+        with patch("zotpilot.embeddings.ollama.ollama_status") as status:
+            assert _check_embedding_backend(config).status == "pass"
+        status.assert_not_called()
+
+    def test_fails_with_the_fix_when_ollama_is_down(self):
+        config = MagicMock()
+        config.embedding_provider = "ollama"
+        config.embedding_model = "bge-large"
+        config.ollama_base_url = "http://localhost:11434"
+        with patch("zotpilot.embeddings.ollama.ollama_status", return_value="Ollama is not running at x"):
+            result = _check_embedding_backend(config)
+        assert result.status == "fail"
+        assert "not running" in result.message
+
+    def test_passes_when_ollama_serves_the_model(self):
+        config = MagicMock()
+        config.embedding_provider = "ollama"
+        config.embedding_model = "bge-large"
+        config.ollama_base_url = "http://localhost:11434"
+        with patch("zotpilot.embeddings.ollama.ollama_status", return_value=None):
+            assert _check_embedding_backend(config).status == "pass"
 
 
 class TestCheckSecretBackend:

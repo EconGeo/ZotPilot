@@ -214,6 +214,10 @@ def index_library(
     post-ingest-review checkpoint gate can fire. Indexing before checkpoint 2 approval writes
     unverified items into ChromaDB and burns embedding API quota (2026-04-08 incident).
     CLI / ad-hoc indexing: leave session_id=None to bypass the gate entirely.
+
+    Embedding backend: before touching the index, a preflight probes the embedder and
+    fails with the fix if it cannot run (for Ollama: server not running, model not pulled).
+    get_index_stats reports the same up front.
     """  # noqa: E501
     if not _index_lock.acquire(blocking=False):
         raise ToolError("Indexing in progress, please wait.")
@@ -340,7 +344,12 @@ def get_index_stats(
         Field(description="Recent vision cost log entries to include when include_vision_costs=true", ge=0),
     ] = 10,
 ) -> dict:
-    """Get index statistics and list of unindexed papers. Call first to check readiness."""
+    """Get index statistics and list of unindexed papers. Call first to check readiness.
+
+    With the Ollama provider, also reports embedding_ready and, when the server is
+    down or the model is not pulled, a _notice_embedding with the fix. Act on it
+    before calling index_library.
+    """
     _config = _get_config()
     if _config.embedding_provider == "none":
         result = {
@@ -426,6 +435,18 @@ def get_index_stats(
             f"\u26a0\ufe0f {unindexed_count} paper(s) in Zotero are not yet indexed."
             f"{sample_note} Call index_library() to update the RAG library."
         )
+
+    # Indexing and semantic search both need a live local embedding server;
+    # say so here, the readiness call, rather than mid-way through index_library.
+    if _config.embedding_provider == "ollama":
+        from ..embeddings.ollama import ollama_status
+
+        problem = ollama_status(_config.ollama_base_url, _config.embedding_model)
+        result["embedding_ready"] = problem is None
+        if problem:
+            result["_notice_embedding"] = (
+                f"⚠️ {problem} index_library and semantic search will fail until it is fixed."
+            )
 
     if include_config:
         result["reranking_config"] = _get_reranking_config_impl()

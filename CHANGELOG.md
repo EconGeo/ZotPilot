@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Ollama not running is caught up front / 提前检测 Ollama 未运行** ——
+  使用 `ollama` 提供方时，`get_index_stats` 返回 `embedding_ready` 与 `_notice_embedding`，
+  `zotpilot doctor` 新增 `embedding_backend` 检查，索引预检在删除任何旧向量之前执行，
+  并明确指出修复方法（启动 Ollama / `ollama pull <model>`）。
+
+  With the `ollama` provider, `get_index_stats` now reports `embedding_ready` and a
+  `_notice_embedding` naming the fix; `zotpilot doctor` gains an `embedding_backend` check
+  (server reachable, model pulled); and the indexing preflight says "Ollama is not running …
+  start it" or "run `ollama pull <model>`" instead of a bare `ConnectError`. The preflight
+  now runs before a forced or changed-PDF re-index deletes old vectors, so a down server can
+  no longer leave those documents missing from the index. Cause: an agent asked to index the
+  library called `index_library` without knowing Ollama had to be up (2026-10-07).
+
 - **Concurrent indexers can no longer corrupt the vector index / 并发索引不再损坏向量索引** ——
   索引租约改为操作系统文件锁（`index_lease.lock`，`flock`/`msvcrt`），在整个索引过程中持有，
   进程退出或崩溃时由内核释放；不再有 60 秒过期规则。租约在 `index_all_libraries` 中获取，

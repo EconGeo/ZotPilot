@@ -133,14 +133,40 @@ def test_index_stats_totals_include_group_libraries(tmp_path, monkeypatch):
     data_dir = _make_db(tmp_path)
     cfg = SimpleNamespace(
         zotero_data_dir=data_dir, embedding_provider="ollama", stats_sample_limit=100,
+        embedding_model="bge-large", ollama_base_url="http://localhost:11434",
     )
     store = _StatsStore({"USERAAAA", "GRPBBBBB"})
     monkeypatch.setattr(indexing_mod, "_get_config", lambda: cfg)
     monkeypatch.setattr(indexing_mod, "_get_store", lambda: store)
     monkeypatch.setattr(indexing_mod, "_get_retriever", lambda: None)
+    monkeypatch.setattr("zotpilot.embeddings.ollama.ollama_status", lambda *_a, **_k: None)
 
     stats = indexing_mod.get_index_stats(limit=10)
 
     assert stats["total_documents"] == 2
     assert stats["total_chunks"] == 20
     assert stats["unindexed_count"] == 0
+    assert stats["embedding_ready"] is True
+    assert "_notice_embedding" not in stats
+
+
+def test_index_stats_warns_up_front_when_ollama_is_down(tmp_path, monkeypatch):
+    import zotpilot.tools.indexing as indexing_mod
+    from tests.test_multi_library_indexing import _make_db
+
+    cfg = SimpleNamespace(
+        zotero_data_dir=_make_db(tmp_path), embedding_provider="ollama", stats_sample_limit=100,
+        embedding_model="bge-large", ollama_base_url="http://localhost:11434",
+    )
+    monkeypatch.setattr(indexing_mod, "_get_config", lambda: cfg)
+    monkeypatch.setattr(indexing_mod, "_get_store", lambda: _StatsStore(set()))
+    monkeypatch.setattr(indexing_mod, "_get_retriever", lambda: None)
+    monkeypatch.setattr(
+        "zotpilot.embeddings.ollama.ollama_status",
+        lambda *_a, **_k: "Ollama is not running at http://localhost:11434.",
+    )
+
+    stats = indexing_mod.get_index_stats(limit=10)
+
+    assert stats["embedding_ready"] is False
+    assert "Ollama is not running" in stats["_notice_embedding"]
