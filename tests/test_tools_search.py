@@ -119,6 +119,48 @@ class TestSearchPapers:
 
         assert [row["doc_id"] for row in output] == ["DOC1"]
 
+    def test_collection_scope_goes_into_where_clause(self, mock_singletons):
+        """A small collection must be scoped before retrieval, not post-filtered from a global top-K."""
+        from zotpilot.tools.search import search_papers
+        zotero = mock_singletons["zotero"].return_value
+        zotero.advanced_search.return_value = [{"doc_id": "A"}]
+        # Hit metadata carries no collection name (index-time metadata can be stale); it must still be kept.
+        results = [_make_rr(doc_id="A")]
+        mock_singletons["retriever"].search.return_value = results
+        mock_singletons["reranker"].rerank.side_effect = lambda rows, *_args, **_kwargs: rows
+
+        output = search_papers(query="data sources", top_k=5, collection="My Pubs")
+
+        assert [row["doc_id"] for row in output] == ["A"]
+        zotero.advanced_search.assert_called_once()
+        conditions = zotero.advanced_search.call_args.kwargs["conditions"]
+        assert conditions == [{"field": "collection", "op": "contains", "value": "My Pubs"}]
+        mock_singletons["retriever"].search.assert_called_once_with(
+            query="data sources",
+            top_k=15,
+            context_window=0,
+            filters={"doc_id": {"$in": ["A"]}},
+        )
+
+    def test_scope_is_intersected_with_live_pdfs(self, mock_singletons):
+        from zotpilot.tools.search import search_papers
+        zotero = mock_singletons["zotero"].return_value
+        zotero.advanced_search.return_value = [{"doc_id": "A"}, {"doc_id": "NO_PDF"}]
+        mock_singletons["retriever"].search.return_value = []
+        mock_singletons["reranker"].rerank.return_value = []
+
+        search_papers(query="q", tag="data-tagged", year_min=2010)
+
+        filters = mock_singletons["retriever"].search.call_args.kwargs["filters"]
+        assert filters == {"$and": [{"doc_id": {"$in": ["A"]}}, {"year": {"$gte": 2010}}]}
+
+    def test_empty_scope_returns_without_searching(self, mock_singletons):
+        from zotpilot.tools.search import search_papers
+        mock_singletons["zotero"].return_value.advanced_search.return_value = []
+
+        assert search_papers(query="q", collection="Nothing") == []
+        mock_singletons["retriever"].search.assert_not_called()
+
 
 class TestSearchTopic:
     def test_happy_path(self, mock_singletons):
@@ -144,6 +186,39 @@ class TestSearchTopic:
         from zotpilot.tools.search import search_topic
         with pytest.raises(Exception, match="Invalid chunk_types"):
             search_topic(query="test", chunk_types=["bad"])
+
+    def test_collection_scope_goes_into_where_clause(self, mock_singletons):
+        from zotpilot.tools.search import search_topic
+        mock_singletons["zotero"].return_value.advanced_search.return_value = [{"doc_id": "B"}]
+        results = [_make_rr(doc_id="B")]
+        mock_singletons["retriever"].search.return_value = results
+        mock_singletons["reranker"].rerank.return_value = results
+
+        output = search_topic(query="q", num_papers=5, collection="GRESB")
+
+        assert [row["doc_id"] for row in output] == ["B"]
+        mock_singletons["retriever"].search.assert_called_once_with(
+            query="q",
+            top_k=50,
+            context_window=0,
+            filters={"doc_id": {"$in": ["B"]}},
+        )
+
+
+class TestSearchTables:
+    def test_collection_scope_combined_with_chunk_type(self, mock_singletons):
+        from zotpilot.tools.search import search_tables
+        mock_singletons["zotero"].return_value.advanced_search.return_value = [{"doc_id": "A"}, {"doc_id": "B"}]
+        mock_singletons["store"].search.return_value = []
+        mock_singletons["reranker"].rerank.return_value = []
+
+        search_tables(query="q", collection="X")
+
+        filters = mock_singletons["store"].search.call_args.kwargs["filters"]
+        assert filters == {"$and": [
+            {"doc_id": {"$in": ["A", "B"]}},
+            {"chunk_type": {"$eq": "table"}},
+        ]}
 
 
 class TestSearchBoolean:

@@ -11,9 +11,8 @@ from pydantic import Field
 from ..filters import (
     VALID_CHUNK_TYPES,
     _apply_required_terms,
-    _apply_text_filters,
     _build_chromadb_filters,
-    _has_text_filters,
+    _resolve_scope_doc_ids,
 )
 from ..index_authority import current_library_pdf_doc_ids
 from ..reranker import validate_journal_weights, validate_section_weights
@@ -47,6 +46,12 @@ def _filter_live_results(results, live_doc_ids: set[str]):
 def _current_pdf_doc_ids() -> set[str]:
     """Resolve the current authoritative set of searchable document IDs."""
     return current_library_pdf_doc_ids(_get_zotero())
+
+
+def _live_scope(author, tag, collection, live_doc_ids: set[str]) -> set[str] | None:
+    """Resolve author/tag/collection filters to searchable doc_ids (None = unscoped)."""
+    scope = _resolve_scope_doc_ids(_get_zotero(), author, tag, collection)
+    return None if scope is None else scope & live_doc_ids
 
 
 @mcp.tool(tags=tool_tags("core", "search"))
@@ -120,13 +125,15 @@ def search_papers(
     reranker = _get_reranker()
     _config = _get_config()
     live_doc_ids = _current_pdf_doc_ids()
+    scope = _live_scope(author, tag, collection, live_doc_ids)
+    if scope is not None and not scope:
+        return []
 
     queries = [query]
 
-    # Oversample for reranking; increase if post-retrieval filters will reduce results
+    # Oversample for reranking; increase if required_terms will reduce results
     base_fetch = min(top_k * _config.oversample_multiplier, 150)
-    has_post_filters = _has_text_filters(author, tag, collection) or required_terms
-    fetch_k = base_fetch * 3 if has_post_filters else base_fetch
+    fetch_k = base_fetch * 3 if required_terms else base_fetch
 
     all_results = []
     for q in queries:
@@ -134,10 +141,9 @@ def search_papers(
             query=q,
             top_k=fetch_k,
             context_window=min(context_chunks, 3),
-            filters=_build_chromadb_filters(year_min, year_max, chunk_types)
+            filters=_build_chromadb_filters(year_min, year_max, chunk_types, doc_ids=scope)
         )
         r = _filter_live_results(r, live_doc_ids)
-        r = _apply_text_filters(r, author, tag, collection)
         if required_terms:
             r = _apply_required_terms(r, required_terms)
         if _config.rerank_enabled:
@@ -206,19 +212,18 @@ def search_topic(
     reranker = _get_reranker()
     _config = _get_config()
     live_doc_ids = _current_pdf_doc_ids()
+    scope = _live_scope(author, tag, collection, live_doc_ids)
+    if scope is not None and not scope:
+        return []
 
     queries = [query]
 
     # Topic discovery needs multiple chunks per paper, but not full passage-search fanout.
-    # Use a lower ceiling than passage search and only modestly expand for text filters.
-    base_fetch = min(
+    # Use a lower ceiling than passage search.
+    fetch_k = min(
         num_papers * _config.oversample_topic_factor * max(_config.oversample_multiplier - 1, 1),
         400,
     )
-    if _has_text_filters(author, tag, collection):
-        fetch_k = min(base_fetch + (num_papers * _config.oversample_topic_factor), 500)
-    else:
-        fetch_k = base_fetch
 
     all_chunks: list = []
     for q in queries:
@@ -226,10 +231,9 @@ def search_topic(
             query=q,
             top_k=fetch_k,
             context_window=0,
-            filters=_build_chromadb_filters(year_min, year_max, chunk_types)
+            filters=_build_chromadb_filters(year_min, year_max, chunk_types, doc_ids=scope)
         )
         r = _filter_live_results(r, live_doc_ids)
-        r = _apply_text_filters(r, author, tag, collection)
         if _config.rerank_enabled:
             r = reranker.rerank(r, section_weights, journal_weights)
         else:
@@ -399,19 +403,18 @@ def search_tables(
     reranker = _get_reranker()
     _config = _get_config()
     live_doc_ids = _current_pdf_doc_ids()
+    scope = _live_scope(author, tag, collection, live_doc_ids)
+    if scope is not None and not scope:
+        return []
 
-    # Build filters: chunk_type=table + year range (ChromaDB-native operators only)
-    type_filter = {"chunk_type": {"$eq": "table"}}
-    year_filter = _build_chromadb_filters(year_min, year_max)
-    filters = {"$and": [type_filter, year_filter]} if year_filter else type_filter
+    # Build filters: chunk_type=table + year range + doc scope (ChromaDB-native operators only)
+    filters = _build_chromadb_filters(year_min, year_max, ["table"], doc_ids=scope)
 
-    # Oversample for reranking; double if text filters active
-    base_fetch = min(top_k * _config.oversample_multiplier, 90)
-    fetch_k = base_fetch * 2 if _has_text_filters(author, tag, collection) else base_fetch
+    # Oversample for reranking
+    fetch_k = min(top_k * _config.oversample_multiplier, 90)
 
     results = store.search(query=query, top_k=fetch_k, filters=filters)
     results = [r for r in results if r.metadata.get("doc_id", "") in live_doc_ids]
-    results = _apply_text_filters(results, author, tag, collection)
 
     # Apply reranking (or bypass if disabled)
     if _config.rerank_enabled:
@@ -485,19 +488,17 @@ def search_figures(
     top_k = max(1, min(top_k, 30))
     store = _get_store()
     live_doc_ids = _current_pdf_doc_ids()
+    scope = _live_scope(author, tag, collection, live_doc_ids)
+    if scope is not None and not scope:
+        return []
 
-    # Build filters: chunk_type=figure + year range (ChromaDB-native operators only)
-    type_filter = {"chunk_type": {"$eq": "figure"}}
-    year_filter = _build_chromadb_filters(year_min, year_max)
-    filters = {"$and": [type_filter, year_filter]} if year_filter else type_filter
+    # Build filters: chunk_type=figure + year range + doc scope (ChromaDB-native operators only)
+    filters = _build_chromadb_filters(year_min, year_max, ["figure"], doc_ids=scope)
 
-    # Oversample if text filters active
-    base_fetch = min(top_k * 3, 90)
-    fetch_k = base_fetch * 2 if _has_text_filters(author, tag, collection) else base_fetch
+    fetch_k = min(top_k * 3, 90)
 
     results = store.search(query=query, top_k=fetch_k, filters=filters)
     results = [r for r in results if r.metadata.get("doc_id", "") in live_doc_ids]
-    results = _apply_text_filters(results, author, tag, collection)
 
     output = []
     for r in results[:top_k]:

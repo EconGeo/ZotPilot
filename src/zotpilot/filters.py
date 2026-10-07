@@ -3,26 +3,63 @@
 VALID_CHUNK_TYPES = {"text", "figure", "table"}
 
 
+_SCOPE_LIMIT = 1_000_000
+
+
+def _resolve_scope_doc_ids(
+    zotero,
+    author: str | None = None,
+    tag: str | None = None,
+    collection: str | None = None,
+) -> set[str] | None:
+    """Resolve author/tag/collection substring filters to live Zotero item keys.
+
+    ChromaDB cannot do substring matching, and post-filtering the top-K of a
+    whole-library search drops nearly every hit for a small scope. Resolving the
+    filters against the live Zotero database first lets the scope go into the
+    ChromaDB where clause as ``doc_id $in``, and reflects current collection and
+    tag membership rather than the metadata frozen at index time.
+
+    Returns:
+        None when no text filter is set; otherwise the matching item keys
+        (possibly empty).
+    """
+    if not _has_text_filters(author, tag, collection):
+        return None
+    conditions = [
+        {"field": field, "op": "contains", "value": value}
+        for field, value in (("author", author), ("tag", tag), ("collection", collection))
+        if value
+    ]
+    rows = zotero.advanced_search(conditions=conditions, match="all", limit=_SCOPE_LIMIT)
+    return {row["doc_id"] for row in rows if row.get("doc_id")}
+
+
 def _build_chromadb_filters(
     year_min: int | None = None,
     year_max: int | None = None,
     chunk_types: list[str] | None = None,
+    doc_ids: set[str] | None = None,
 ) -> dict | None:
-    """Build ChromaDB where clause for year range and chunk_type filters.
+    """Build ChromaDB where clause for year range, chunk_type and doc_id scope.
 
     IMPORTANT: ChromaDB only supports: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
     It does NOT support substring/contains operations on metadata.
-    Text-based filters (author, tag, collection) must use _apply_text_filters().
+    Text-based filters (author, tag, collection) are resolved to doc_ids first
+    with _resolve_scope_doc_ids() and passed here as ``doc_ids``.
 
     Args:
         year_min: Minimum publication year
         year_max: Maximum publication year
         chunk_types: Filter to specific chunk types (text, figure, table)
+        doc_ids: Restrict to these document IDs (None = no restriction)
 
     Returns:
         ChromaDB where clause dict, or None if no filters
     """
     conditions = []
+    if doc_ids is not None:
+        conditions.append({"doc_id": {"$in": sorted(doc_ids)}})
     if year_min:
         conditions.append({"year": {"$gte": year_min}})
     if year_max:

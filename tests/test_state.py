@@ -61,6 +61,35 @@ class TestBuildChromadbFilters:
         result = _build_chromadb_filters(chunk_types=["text", "figure"])
         assert result == {"chunk_type": {"$in": ["text", "figure"]}}
 
+    def test_build_chromadb_filters_doc_ids(self):
+        result = _build_chromadb_filters(doc_ids={"B", "A"})
+        assert result == {"doc_id": {"$in": ["A", "B"]}}
+
+    def test_build_chromadb_filters_doc_ids_with_year(self):
+        result = _build_chromadb_filters(year_max=2020, doc_ids={"A"})
+        assert result == {"$and": [{"doc_id": {"$in": ["A"]}}, {"year": {"$lte": 2020}}]}
+
+
+class TestResolveScopeDocIds:
+    def test_no_filters_returns_none(self):
+        from zotpilot.filters import _resolve_scope_doc_ids
+        zotero = MagicMock()
+        assert _resolve_scope_doc_ids(zotero) is None
+        zotero.advanced_search.assert_not_called()
+
+    def test_combines_filters_with_and(self):
+        from zotpilot.filters import _resolve_scope_doc_ids
+        zotero = MagicMock()
+        zotero.advanced_search.return_value = [{"doc_id": "A"}, {"doc_id": "B"}]
+        result = _resolve_scope_doc_ids(zotero, author="Mueller", collection="My Pubs")
+        assert result == {"A", "B"}
+        kwargs = zotero.advanced_search.call_args.kwargs
+        assert kwargs["match"] == "all"
+        assert kwargs["conditions"] == [
+            {"field": "author", "op": "contains", "value": "Mueller"},
+            {"field": "collection", "op": "contains", "value": "My Pubs"},
+        ]
+
 
 # ---------------------------------------------------------------------------
 # _apply_text_filters
