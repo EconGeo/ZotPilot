@@ -1,18 +1,7 @@
 ---
 name: ztp-tutor
 description: >
-  Deep reading guide for a single paper already in the Zotero library.
-  Writes 5-dimension color highlights with per-sentence Chinese comments,
-  figure/table/equation annotations, and a page-1 argument-structure
-  overview directly into the Zotero-stored PDF. Original PDF is always
-  backed up to a .ztpbak sidecar before any write.
-  Trigger on: "论文导读", "/ztp-tutor", "帮我导读", "五维导读",
-  "deep reading guide", "tutoring this paper", "给这篇论文做导读",
-  "annotate this paper for reading", "帮我精读", "论文精读",
-  "reading guide for", "导读一下", "帮我读这篇", "批注这篇论文",
-  "阅读引导", "reading assistant", "paper walkthrough", "guided reading".
-  For finding and ingesting new papers, use ztp-research instead.
-  For synthesizing multiple papers already in the library, use ztp-review instead.
+  Deep reading guide for one paper already in the Zotero library: writes 5-dimension colour highlights with per-sentence Chinese comments, figure/table/equation notes and a page-1 argument overview into the stored PDF (backed up to a .ztpbak sidecar first). Use for "deep reading guide", "annotate this paper for reading", "guided reading" or /ztp-tutor. To find new papers use ztp-research; to synthesise several, ztp-review.
 ---
 # Deep Reading Guide (五维导读)
 
